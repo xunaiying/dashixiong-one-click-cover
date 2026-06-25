@@ -1444,6 +1444,194 @@ def create_voice_preview(
     }
 
 
+def unique_int_candidates(values: list[int], min_value: int = -24, max_value: int = 24, limit: int = 3) -> list[int]:
+    result: list[int] = []
+    for value in values:
+        item = max(min_value, min(max_value, int(round(value))))
+        if item not in result:
+            result.append(item)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def unique_float_candidates(values: list[float], min_value: float, max_value: float, limit: int) -> list[float]:
+    result: list[float] = []
+    for value in values:
+        item = round(max(min_value, min(max_value, float(value))), 2)
+        if item not in result:
+            result.append(item)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def pitch_matrix_candidates(base_pitch: int, estimated_pitch: int | None) -> list[int]:
+    if estimated_pitch is not None:
+        return unique_int_candidates([estimated_pitch, estimated_pitch - 3, estimated_pitch + 3, 0], -12, 12, 3)
+    if int(base_pitch) == 0:
+        return [0, -5, -12]
+    return unique_int_candidates([base_pitch, base_pitch - 3, base_pitch + 3, 0], -12, 12, 3)
+
+
+def index_matrix_candidates(base_index: float) -> list[float]:
+    return unique_float_candidates([base_index, 0.35, 0.50, 0.65], 0.0, 1.0, 3)
+
+
+def protect_matrix_candidates(base_protect: float) -> list[float]:
+    return unique_float_candidates([base_protect, 0.60, 0.45, 0.70], 0.0, 0.75, 2)
+
+
+def parameter_slug(pitch: int, index_rate: float, protect: float) -> str:
+    pitch_part = f"p{'p' if pitch >= 0 else 'm'}{abs(int(pitch)):02d}"
+    index_part = f"i{int(round(index_rate * 100)):03d}"
+    protect_part = f"pr{int(round(protect * 100)):03d}"
+    return f"{pitch_part}_{index_part}_{protect_part}"
+
+
+def create_parameter_preview_matrix(
+    song_path: Path,
+    model_name: str,
+    pth_path: Path | None,
+    index_path: Path | None,
+    output_dir: Path,
+    pitch: int,
+    index_rate: float,
+    protect: float,
+    log,
+    auto_pitch: bool = True,
+    auto_mix: bool = True,
+    vocal_gain: float = 1.0,
+    instrumental_gain: float = 1.0,
+    start_seconds: float = 30.0,
+    duration_seconds: float = 15.0,
+) -> dict[str, object]:
+    """Generate a batch of short A/B cover previews with different inference parameters."""
+    if not song_path.exists():
+        raise FileNotFoundError(f"Song file not found: {song_path}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    preview_root = output_dir / "previews"
+    preview_root.mkdir(parents=True, exist_ok=True)
+
+    requested_model_name = (model_name or "").strip() or "auto"
+    if pth_path and index_path:
+        pth, index = pth_path, index_path
+        resolved_model_name = safe_filename(pth.stem, "manual_model")
+        display_model_name = resolved_model_name
+        log(f"矩阵试听使用手动模型：{pth}")
+        log(f"矩阵试听使用手动索引：{index}")
+    else:
+        existing = resolve_existing_model(requested_model_name, log)
+        if not existing:
+            raise FileNotFoundError("没有找到可试听的已训练模型。请先训练完成，或手动选择 .pth 和 .index。")
+        resolved_model_name, pth, index = existing
+        display_model_name = read_model_display_name(resolved_model_name)
+
+    song_stem = safe_filename(song_path.stem)
+    model_stem = safe_filename(display_model_name, "model")
+    matrix_duration = max(3.0, min(15.0, float(duration_seconds)))
+    if matrix_duration < float(duration_seconds):
+        log(f"矩阵试听为节省时间，单段时长限制为 {matrix_duration:.1f}s。")
+
+    work_dir = preview_root / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}_{song_stem}_{model_stem}_matrix"
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    original_mix = work_dir / f"{song_stem}_00_original_mix_matrix.mp3"
+    extract_audio_segment(song_path, original_mix, start_seconds, matrix_duration, log)
+    vocals, instrumental = separate_song(original_mix, work_dir, log)
+    original_vocals = work_dir / f"{song_stem}_01_original_vocals_matrix.wav"
+    original_instrumental = work_dir / f"{song_stem}_02_instrumental_matrix.wav"
+    shutil.copy2(vocals, original_vocals)
+    shutil.copy2(instrumental, original_instrumental)
+
+    estimated_pitch: int | None = None
+    if auto_pitch:
+        estimated_pitch = estimate_pitch_shift(resolved_model_name, original_vocals, log)
+        if estimated_pitch is not None:
+            log(f"矩阵试听：自动估算中心变调为 {estimated_pitch:+d}。")
+
+    pitch_values = pitch_matrix_candidates(int(pitch), estimated_pitch)
+    index_values = index_matrix_candidates(float(index_rate))
+    protect_values = protect_matrix_candidates(float(protect))
+    combinations = [
+        (p, idx, pr)
+        for p in pitch_values
+        for idx in index_values
+        for pr in protect_values
+    ]
+    log(
+        "开始参数试听矩阵："
+        f"变调 {pitch_values} × 索引 {index_values} × 辅音保护 {protect_values}，"
+        f"共 {len(combinations)} 组。"
+    )
+
+    cover_files: list[Path] = []
+    summary_lines = [
+        "大尸兄一键翻唱 - 自动参数试听矩阵",
+        f"歌曲：{song_path}",
+        f"模型：{display_model_name} [{resolved_model_name}]",
+        f"预览起点：{float(start_seconds):.1f}s",
+        f"预览时长：{matrix_duration:.1f}s",
+        "",
+        "建议听法：先听混音 mp3；咬字糊就选 protect 高一点；不像本人就选 index 高一点；音高怪就换 pitch。",
+        "",
+        "文件\tpitch\tindex_rate\tprotect",
+    ]
+
+    total = len(combinations)
+    for number, (candidate_pitch, candidate_index, candidate_protect) in enumerate(combinations, start=1):
+        slug = parameter_slug(candidate_pitch, candidate_index, candidate_protect)
+        prefix = f"{number:02d}_{slug}"
+        log(
+            f"[{number}/{total}] 生成矩阵试听："
+            f"pitch {candidate_pitch:+d}, index {candidate_index:.2f}, protect {candidate_protect:.2f}"
+        )
+        converted_vocals = work_dir / f"{prefix}_cover_vocals.wav"
+        infer_vocals(
+            original_vocals,
+            pth,
+            index,
+            converted_vocals,
+            candidate_pitch,
+            candidate_index,
+            candidate_protect,
+            log,
+        )
+        cover_mix = work_dir / f"{prefix}_cover_mix.mp3"
+        mix_cover(
+            converted_vocals,
+            original_instrumental,
+            cover_mix,
+            log,
+            vocal_gain=vocal_gain,
+            instrumental_gain=instrumental_gain,
+            reference_vocal_path=original_vocals,
+            auto_mix=auto_mix,
+        )
+        cover_files.append(cover_mix)
+        summary_lines.append(
+            f"{cover_mix.name}\t{candidate_pitch:+d}\t{candidate_index:.2f}\t{candidate_protect:.2f}"
+        )
+
+    latest_original = preview_root / f"{song_stem}_matrix_original_preview.mp3"
+    shutil.copy2(original_mix, latest_original)
+    summary_path = work_dir / "参数试听矩阵说明.txt"
+    summary_path.write_text("\n".join(summary_lines), encoding="utf-8")
+
+    log(f"矩阵原唱预览：{latest_original}")
+    log(f"矩阵试听目录：{work_dir}")
+    log(f"矩阵说明文件：{summary_path}")
+    if cover_files:
+        log(f"第一条矩阵试听：{cover_files[0]}")
+    return {
+        "original_mix": latest_original,
+        "matrix_dir": work_dir,
+        "summary": summary_path,
+        "cover_files": cover_files,
+        "first_cover": cover_files[0] if cover_files else None,
+    }
+
+
 class CoverApp:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -1671,6 +1859,7 @@ class CoverApp:
         self.preview_duration = tk.DoubleVar(value=20.0)
         self.last_original_preview = tk.StringVar()
         self.last_cover_preview = tk.StringVar()
+        self.last_matrix_dir = tk.StringVar()
         self.status = tk.StringVar(value="就绪")
         self.training_progress_text = tk.StringVar(value="训练进度：未开始")
         self.training_progress_value = tk.DoubleVar(value=0.0)
@@ -1739,6 +1928,8 @@ class CoverApp:
         ttk.Button(preview_grid, text="播放原唱预览", command=self.play_original_preview).grid(row=1, column=0, columnspan=2, sticky="ew", padx=6, pady=4)
         ttk.Button(preview_grid, text="播放翻唱预览", command=self.play_cover_preview).grid(row=1, column=2, columnspan=2, sticky="ew", padx=6, pady=4)
         ttk.Button(preview_grid, text="打开预览目录", command=self.open_preview_dir).grid(row=1, column=4, sticky="ew", padx=6, pady=4)
+        ttk.Button(preview_grid, text="自动参数试听矩阵", command=self.start_parameter_matrix).grid(row=2, column=0, columnspan=2, sticky="ew", padx=6, pady=4)
+        ttk.Button(preview_grid, text="打开矩阵目录", command=self.open_matrix_dir).grid(row=2, column=2, columnspan=2, sticky="ew", padx=6, pady=4)
         for col in (1, 3, 4):
             preview_grid.columnconfigure(col, weight=1)
 
@@ -1909,6 +2100,13 @@ class CoverApp:
         path.mkdir(parents=True, exist_ok=True)
         os.startfile(str(path))
 
+    def open_matrix_dir(self):
+        path_text = self.last_matrix_dir.get().strip()
+        if path_text and Path(path_text).exists():
+            os.startfile(path_text)
+            return
+        self.open_preview_dir()
+
     def play_preview_path(self, path_text: str, title: str):
         path_text = (path_text or "").strip()
         if not path_text:
@@ -1987,6 +2185,74 @@ class CoverApp:
             except Exception as exc:
                 self.log_threadsafe(f"预览失败：{exc}")
                 self.status_threadsafe("预览失败")
+            finally:
+                self.running = False
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def start_parameter_matrix(self):
+        if self.running:
+            messagebox.showinfo("提示", "已有任务正在运行，请等当前任务结束后再生成参数矩阵。")
+            return
+        if not self.song.get():
+            messagebox.showerror("缺少歌曲", "请先选择歌曲文件。")
+            return
+
+        choice = self.model_choice.get()
+        manual_mode = choice == MANUAL_MODEL_LABEL
+        if manual_mode and (not self.pth.get() or not self.index.get()):
+            messagebox.showerror("模型不完整", "手动模型模式需要同时选择 .pth 和 .index。")
+            return
+        if choice == TRAIN_MODEL_LABEL:
+            messagebox.showinfo("需要已有模型", "参数矩阵需要已训练完成的模型。请训练完成后刷新模型列表，再选择该模型。")
+            return
+
+        ok = messagebox.askyesno(
+            "确认生成参数试听矩阵",
+            "将生成最多 18 个短试听文件：\n"
+            "- 3 个变调\n"
+            "- 3 个索引强度\n"
+            "- 2 个辅音保护\n\n"
+            "只会截取短片段，且只分离一次，但仍可能需要几分钟。继续吗？",
+        )
+        if not ok:
+            return
+
+        self.running = True
+        self.status.set("正在生成参数试听矩阵…")
+        self.write("开始生成自动参数试听矩阵：完成后请打开矩阵目录逐个试听。")
+
+        def task():
+            try:
+                pth_path = Path(self.pth.get()) if manual_mode else None
+                index_path = Path(self.index.get()) if manual_mode else None
+                result = create_parameter_preview_matrix(
+                    song_path=Path(self.song.get()),
+                    model_name=self.selected_model_name_for_preview(),
+                    pth_path=pth_path,
+                    index_path=index_path,
+                    output_dir=Path(self.output_dir.get()),
+                    pitch=int(self.pitch.get()),
+                    index_rate=float(self.index_rate.get()),
+                    protect=float(self.protect.get()),
+                    log=self.log_threadsafe,
+                    auto_pitch=bool(self.auto_pitch.get()),
+                    auto_mix=bool(self.auto_mix.get()),
+                    vocal_gain=float(self.vocal_gain.get()),
+                    instrumental_gain=float(self.instrumental_gain.get()),
+                    start_seconds=float(self.preview_start.get()),
+                    duration_seconds=float(self.preview_duration.get()),
+                )
+                self.queue.put(f"__ORIGINAL_PREVIEW__:{result['original_mix']}")
+                if result.get("first_cover"):
+                    self.queue.put(f"__COVER_PREVIEW__:{result['first_cover']}")
+                self.queue.put(f"__MATRIX_DIR__:{result['matrix_dir']}")
+                self.status_threadsafe("参数试听矩阵完成")
+                if self.open_when_done.get():
+                    os.startfile(str(Path(result["matrix_dir"])))
+            except Exception as exc:
+                self.log_threadsafe(f"参数矩阵失败：{exc}")
+                self.status_threadsafe("参数矩阵失败")
             finally:
                 self.running = False
 
@@ -2095,6 +2361,10 @@ class CoverApp:
                 if message.startswith("__COVER_PREVIEW__:"):
                     self.last_cover_preview.set(message.split(":", 1)[1])
                     self.write(f"可播放翻唱预览：{self.last_cover_preview.get()}")
+                    continue
+                if message.startswith("__MATRIX_DIR__:"):
+                    self.last_matrix_dir.set(message.split(":", 1)[1])
+                    self.write(f"可打开参数矩阵目录：{self.last_matrix_dir.get()}")
                     continue
                 if message.startswith("__STATUS__:"):
                     self.status.set(message.split(":", 1)[1])

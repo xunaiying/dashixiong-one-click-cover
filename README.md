@@ -21,6 +21,7 @@
 - **智能混音**：参考原唱人声/伴奏比例，自动匹配翻唱人声与伴奏音量，并做轻微伴奏让位。
 - **完整成品输出**：输出带伴奏、带混音和响度处理的 `*_mixed_cover.mp3`。
 - **原唱/翻唱对比预览**：截取短片段生成原唱预览和翻唱后预览，可直接播放对比音色与咬字。
+- **自动参数试听矩阵**：一键批量生成多组短试听，对比不同变调、索引强度和辅音保护，快速找到最自然参数。
 - **一键清理训练缓存**：训练完成后可自动/手动清理切片、特征、F0、TensorBoard、G/D checkpoint 和旧权重，只保留可翻唱的声音模型。
 
 ## Features (English)
@@ -35,6 +36,7 @@
 - **Smart auto-mixing**: matches the original song's vocal/instrumental balance and applies light backing-track ducking.
 - **Finished mixed output**: exports a mastered `*_mixed_cover.mp3` instead of vocal-only audio.
 - **Original/cover A-B preview**: generates short original and converted preview clips for quick voice and pronunciation checks.
+- **Automatic parameter preview matrix**: batch-generates short clips with different pitch, index rate, and protect settings for quick A/B tuning.
 - **One-click training cache cleanup**: automatically or manually removes slices, features, F0 files, TensorBoard logs, G/D checkpoints, and old weights while keeping the usable voice model.
 
 ## 快速开始 / Quick Start
@@ -49,11 +51,11 @@
 
 打开 Release 页面：
 
-[https://github.com/xunaiying/dashixiong-one-click-cover/releases/tag/v1.0.7](https://github.com/xunaiying/dashixiong-one-click-cover/releases/tag/v1.0.7)
+[https://github.com/xunaiying/dashixiong-one-click-cover/releases/tag/v1.0.8](https://github.com/xunaiying/dashixiong-one-click-cover/releases/tag/v1.0.8)
 
 直接下载：
 
-[https://github.com/xunaiying/dashixiong-one-click-cover/releases/download/v1.0.7/dashixiong-one-click-cover-v1.0.7.zip](https://github.com/xunaiying/dashixiong-one-click-cover/releases/download/v1.0.7/dashixiong-one-click-cover-v1.0.7.zip)
+[https://github.com/xunaiying/dashixiong-one-click-cover/releases/download/v1.0.8/dashixiong-one-click-cover-v1.0.8.zip](https://github.com/xunaiying/dashixiong-one-click-cover/releases/download/v1.0.8/dashixiong-one-click-cover-v1.0.8.zip)
 
 解压到纯英文路径，例如：
 
