@@ -653,7 +653,24 @@ def median_audio_f0(audio_path: Path) -> float | None:
     import librosa
     import numpy as np
 
-    y, sr = librosa.load(str(audio_path), sr=16000, mono=True, duration=180)
+    tmp_audio: Path | None = None
+    try:
+        y, sr = librosa.load(str(audio_path), sr=16000, mono=True, duration=180)
+    except Exception:
+        # Some Windows audio backends still stumble on Chinese/non-ASCII paths.
+        # Copying to an ASCII temp path keeps auto pitch from aborting the whole cover.
+        tmp_dir = DEFAULT_OUTPUT_DIR / "_tmp_pitch"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        suffix = audio_path.suffix if audio_path.suffix else ".wav"
+        tmp_audio = tmp_dir / f"pitch_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}{suffix}"
+        shutil.copy2(audio_path, tmp_audio)
+        try:
+            y, sr = librosa.load(str(tmp_audio), sr=16000, mono=True, duration=180)
+        finally:
+            try:
+                tmp_audio.unlink()
+            except OSError:
+                pass
     if y.size < sr:
         return None
 
@@ -684,7 +701,14 @@ def median_audio_f0(audio_path: Path) -> float | None:
 
 def estimate_pitch_shift(model_name: str, vocals_path: Path, log) -> int | None:
     target_f0 = median_model_f0(model_name)
-    source_f0 = median_audio_f0(vocals_path)
+    if not target_f0:
+        log("自动变调：模型音高缓存不足，沿用手动变调。")
+        return None
+    try:
+        source_f0 = median_audio_f0(vocals_path)
+    except Exception as exc:
+        log(f"自动变调：歌曲人声音高分析失败，沿用手动变调。原因：{exc}")
+        return None
     if not target_f0 or not source_f0:
         log("自动变调：可用音高信息不足，沿用手动变调。")
         return None
