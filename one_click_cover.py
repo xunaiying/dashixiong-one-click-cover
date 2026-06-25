@@ -657,6 +657,42 @@ def separate_song(song_path: Path, work_dir: Path, log) -> tuple[Path, Path]:
     return named_vocals, named_instrumental
 
 
+def extract_audio_segment(
+    input_path: Path,
+    output_path: Path,
+    start_seconds: float,
+    duration_seconds: float,
+    log,
+) -> Path:
+    if not FFMPEG.exists():
+        raise FileNotFoundError(f"ffmpeg.exe not found at {FFMPEG}")
+    start_seconds = max(0.0, float(start_seconds))
+    duration_seconds = max(3.0, min(120.0, float(duration_seconds)))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.suffix.lower() == ".wav":
+        codec_args = ["-ac", "2", "-ar", "44100", "-c:a", "pcm_s16le"]
+    else:
+        codec_args = ["-ac", "2", "-ar", "44100", "-c:a", "libmp3lame", "-b:a", "320k"]
+    log(f"截取预览片段：从 {start_seconds:.1f}s 开始，时长 {duration_seconds:.1f}s")
+    run_command(
+        [
+            str(FFMPEG),
+            "-y",
+            "-ss",
+            f"{start_seconds:.3f}",
+            "-t",
+            f"{duration_seconds:.3f}",
+            "-i",
+            str(input_path),
+            "-vn",
+            *codec_args,
+            str(output_path),
+        ],
+        log,
+    )
+    return output_path
+
+
 def infer_vocals(
     vocals_path: Path,
     pth_path: Path,
@@ -1029,6 +1065,120 @@ def create_cover(
     return final_path
 
 
+def create_voice_preview(
+    song_path: Path,
+    model_name: str,
+    pth_path: Path | None,
+    index_path: Path | None,
+    output_dir: Path,
+    pitch: int,
+    index_rate: float,
+    gpu: str,
+    log,
+    auto_pitch: bool = True,
+    clarity_mode: bool = True,
+    protect: float = 0.50,
+    auto_mix: bool = True,
+    vocal_gain: float = 1.0,
+    instrumental_gain: float = 1.0,
+    start_seconds: float = 30.0,
+    duration_seconds: float = 20.0,
+) -> dict[str, Path]:
+    """Create short A/B previews: original source segment and converted cover segment."""
+    if not song_path.exists():
+        raise FileNotFoundError(f"Song file not found: {song_path}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    preview_root = output_dir / "previews"
+    preview_root.mkdir(parents=True, exist_ok=True)
+
+    requested_model_name = (model_name or "").strip() or "auto"
+    if pth_path and index_path:
+        pth, index = pth_path, index_path
+        resolved_model_name = safe_filename(pth.stem, "manual_model")
+        display_model_name = resolved_model_name
+        log(f"预览使用手动模型：{pth}")
+        log(f"预览使用手动索引：{index}")
+    else:
+        existing = resolve_existing_model(requested_model_name, log)
+        if not existing:
+            raise FileNotFoundError("没有找到可预览的已训练模型。请先训练完成，或手动选择 .pth 和 .index。")
+        resolved_model_name, pth, index = existing
+        display_model_name = read_model_display_name(resolved_model_name)
+
+    song_stem = safe_filename(song_path.stem)
+    model_stem = safe_filename(display_model_name, "model")
+    work_dir = preview_root / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}_{song_stem}_{model_stem}_preview"
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    original_mix = work_dir / f"{song_stem}_00_original_mix_preview.mp3"
+    extract_audio_segment(song_path, original_mix, start_seconds, duration_seconds, log)
+
+    vocals, instrumental = separate_song(original_mix, work_dir, log)
+    original_vocals = work_dir / f"{song_stem}_01_original_vocals_preview.wav"
+    original_instrumental = work_dir / f"{song_stem}_02_instrumental_preview.wav"
+    shutil.copy2(vocals, original_vocals)
+    shutil.copy2(instrumental, original_instrumental)
+
+    if auto_pitch:
+        estimated_pitch = estimate_pitch_shift(resolved_model_name, original_vocals, log)
+        if estimated_pitch is not None:
+            pitch = estimated_pitch
+
+    effective_index_rate = max(0.0, min(1.0, float(index_rate)))
+    effective_protect = max(0.0, min(0.75, float(protect)))
+    if clarity_mode:
+        effective_index_rate = min(effective_index_rate, 0.45)
+        effective_protect = max(effective_protect, 0.50)
+        log(
+            "预览咬字清晰模式已开启："
+            f"索引强度 {effective_index_rate:.2f}，辅音保护 {effective_protect:.2f}"
+        )
+    else:
+        log("预览咬字清晰模式已关闭。")
+
+    converted_vocals = work_dir / f"{song_stem}_{model_stem}_03_cover_vocals_preview.wav"
+    infer_vocals(
+        original_vocals,
+        pth,
+        index,
+        converted_vocals,
+        pitch,
+        effective_index_rate,
+        effective_protect,
+        log,
+    )
+
+    cover_mix = work_dir / f"{song_stem}_{model_stem}_04_cover_mix_preview.mp3"
+    mix_cover(
+        converted_vocals,
+        original_instrumental,
+        cover_mix,
+        log,
+        vocal_gain=vocal_gain,
+        instrumental_gain=instrumental_gain,
+        reference_vocal_path=original_vocals,
+        auto_mix=auto_mix,
+    )
+
+    latest_original = preview_root / f"{song_stem}_original_preview.mp3"
+    latest_cover = preview_root / f"{song_stem}_{model_stem}_cover_preview.mp3"
+    shutil.copy2(original_mix, latest_original)
+    shutil.copy2(cover_mix, latest_cover)
+
+    log(f"原唱预览：{latest_original}")
+    log(f"翻唱预览：{latest_cover}")
+    log(f"原唱人声预览：{original_vocals}")
+    log(f"翻唱人声预览：{converted_vocals}")
+    log(f"预览中间文件目录：{work_dir}")
+    return {
+        "original_mix": latest_original,
+        "cover_mix": latest_cover,
+        "original_vocals": original_vocals,
+        "cover_vocals": converted_vocals,
+        "work_dir": work_dir,
+    }
+
+
 class CoverApp:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -1225,8 +1375,8 @@ class CoverApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("大尸兄一键翻唱")
-        self.root.geometry("980x720")
-        self.root.minsize(900, 640)
+        self.root.geometry("1020x780")
+        self.root.minsize(940, 700)
         self.queue: queue.Queue[str] = queue.Queue()
         self.running = False
         self.model_lookup: dict[str, dict[str, object]] = {}
@@ -1252,6 +1402,10 @@ class CoverApp:
         self.gpu = tk.StringVar(value="0")
         self.open_when_done = tk.BooleanVar(value=True)
         self.cleanup_after_train = tk.BooleanVar(value=True)
+        self.preview_start = tk.DoubleVar(value=30.0)
+        self.preview_duration = tk.DoubleVar(value=20.0)
+        self.last_original_preview = tk.StringVar()
+        self.last_cover_preview = tk.StringVar()
         self.status = tk.StringVar(value="就绪")
 
         self.build_ui()
@@ -1307,6 +1461,19 @@ class CoverApp:
         self.labeled_combo(grid, "采样率", self.sample_rate, [32000, 40000, 48000], 3, 4)
         for col in (1, 3, 5):
             grid.columnconfigure(col, weight=1)
+
+        preview_box = ttk.LabelFrame(self.root, text="4. 声音预览")
+        preview_box.pack(fill="x", **pad)
+        preview_grid = ttk.Frame(preview_box)
+        preview_grid.pack(fill="x", padx=8, pady=8)
+        self.labeled_entry(preview_grid, "预览起点秒", self.preview_start, 0, 0)
+        self.labeled_entry(preview_grid, "预览时长秒", self.preview_duration, 0, 2)
+        ttk.Button(preview_grid, text="生成原唱/翻唱预览", command=self.start_preview).grid(row=0, column=4, sticky="ew", padx=6, pady=4)
+        ttk.Button(preview_grid, text="播放原唱预览", command=self.play_original_preview).grid(row=1, column=0, columnspan=2, sticky="ew", padx=6, pady=4)
+        ttk.Button(preview_grid, text="播放翻唱预览", command=self.play_cover_preview).grid(row=1, column=2, columnspan=2, sticky="ew", padx=6, pady=4)
+        ttk.Button(preview_grid, text="打开预览目录", command=self.open_preview_dir).grid(row=1, column=4, sticky="ew", padx=6, pady=4)
+        for col in (1, 3, 4):
+            preview_grid.columnconfigure(col, weight=1)
 
         actions = ttk.Frame(self.root)
         actions.pack(fill="x", **pad)
@@ -1463,6 +1630,94 @@ class CoverApp:
         path.mkdir(parents=True, exist_ok=True)
         os.startfile(str(path))
 
+    def open_preview_dir(self):
+        path = Path(self.output_dir.get()) / "previews"
+        path.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(path))
+
+    def play_preview_path(self, path_text: str, title: str):
+        path_text = (path_text or "").strip()
+        if not path_text:
+            messagebox.showinfo("暂无预览", f"还没有{title}。请先点击“生成原唱/翻唱预览”。")
+            return
+        path = Path(path_text)
+        if not path.exists():
+            messagebox.showerror("预览文件不存在", f"找不到{title}文件：\n{path}")
+            return
+        os.startfile(str(path))
+
+    def play_original_preview(self):
+        self.play_preview_path(self.last_original_preview.get(), "原唱预览")
+
+    def play_cover_preview(self):
+        self.play_preview_path(self.last_cover_preview.get(), "翻唱预览")
+
+    def selected_model_name_for_preview(self) -> str:
+        choice = self.model_choice.get()
+        item = self.model_lookup.get(choice)
+        if item:
+            return str(item["name"])
+        if choice == AUTO_MODEL_LABEL:
+            return "auto"
+        return self.model_name.get().strip() or "auto"
+
+    def start_preview(self):
+        if self.running:
+            messagebox.showinfo("提示", "已有任务正在运行，请等当前任务结束后再生成预览。")
+            return
+        if not self.song.get():
+            messagebox.showerror("缺少歌曲", "请先选择歌曲文件。")
+            return
+
+        choice = self.model_choice.get()
+        manual_mode = choice == MANUAL_MODEL_LABEL
+        if manual_mode and (not self.pth.get() or not self.index.get()):
+            messagebox.showerror("模型不完整", "手动模型模式需要同时选择 .pth 和 .index。")
+            return
+        if choice == TRAIN_MODEL_LABEL:
+            messagebox.showinfo("需要已有模型", "声音预览需要已训练完成的模型。请训练完成后刷新模型列表，再选择该模型预览。")
+            return
+
+        self.running = True
+        self.status.set("正在生成声音预览…")
+        self.write("开始生成声音预览：会输出原唱预览和翻唱后预览。")
+
+        def task():
+            try:
+                pth_path = Path(self.pth.get()) if manual_mode else None
+                index_path = Path(self.index.get()) if manual_mode else None
+                result = create_voice_preview(
+                    song_path=Path(self.song.get()),
+                    model_name=self.selected_model_name_for_preview(),
+                    pth_path=pth_path,
+                    index_path=index_path,
+                    output_dir=Path(self.output_dir.get()),
+                    pitch=int(self.pitch.get()),
+                    index_rate=float(self.index_rate.get()),
+                    gpu=self.gpu.get().strip() or "0",
+                    log=self.log_threadsafe,
+                    auto_pitch=bool(self.auto_pitch.get()),
+                    clarity_mode=bool(self.clarity_mode.get()),
+                    protect=float(self.protect.get()),
+                    auto_mix=bool(self.auto_mix.get()),
+                    vocal_gain=float(self.vocal_gain.get()),
+                    instrumental_gain=float(self.instrumental_gain.get()),
+                    start_seconds=float(self.preview_start.get()),
+                    duration_seconds=float(self.preview_duration.get()),
+                )
+                self.queue.put(f"__ORIGINAL_PREVIEW__:{result['original_mix']}")
+                self.queue.put(f"__COVER_PREVIEW__:{result['cover_mix']}")
+                self.status_threadsafe("声音预览完成")
+                if self.open_when_done.get():
+                    os.startfile(str(Path(result["work_dir"])))
+            except Exception as exc:
+                self.log_threadsafe(f"预览失败：{exc}")
+                self.status_threadsafe("预览失败")
+            finally:
+                self.running = False
+
+        threading.Thread(target=task, daemon=True).start()
+
     def cleanup_target_model_name(self) -> str:
         choice = self.model_choice.get()
         item = self.model_lookup.get(choice)
@@ -1541,6 +1796,14 @@ class CoverApp:
                 message = self.queue.get_nowait()
                 if message == "__REFRESH_MODELS__":
                     self.refresh_models(write_log=False)
+                    continue
+                if message.startswith("__ORIGINAL_PREVIEW__:"):
+                    self.last_original_preview.set(message.split(":", 1)[1])
+                    self.write(f"可播放原唱预览：{self.last_original_preview.get()}")
+                    continue
+                if message.startswith("__COVER_PREVIEW__:"):
+                    self.last_cover_preview.set(message.split(":", 1)[1])
+                    self.write(f"可播放翻唱预览：{self.last_cover_preview.get()}")
                     continue
                 if message.startswith("__STATUS__:"):
                     self.status.set(message.split(":", 1)[1])
