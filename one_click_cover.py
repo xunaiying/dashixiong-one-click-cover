@@ -8,10 +8,13 @@ import subprocess
 import sys
 import threading
 import time
+import json
+import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+from urllib.request import Request, urlopen
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -23,6 +26,24 @@ LOG_DIR = APP_DIR / "logs"
 AUTO_MODEL_LABEL = "自动选择最新可用模型"
 TRAIN_MODEL_LABEL = "训练新模型（使用新声音）"
 MANUAL_MODEL_LABEL = "手动选择 .pth + .index"
+APP_VERSION = "1.0.9"
+GITHUB_REPO = "xunaiying/dashixiong-one-click-cover"
+GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+GITHUB_RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
+PRESERVE_UPDATE_TOPLEVEL = {
+    ".git",
+    "__pycache__",
+    "env",
+    "logs",
+    "outputs",
+    "updates",
+    "tmp",
+    "temp",
+}
+PRESERVE_UPDATE_FILES = {
+    "ffmpeg.exe",
+    "ffprobe.exe",
+}
 
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma", ".aiff", ".webm", ".mp4"}
 
@@ -37,6 +58,165 @@ def slugify(value: str) -> str:
 def safe_filename(value: str, default: str = "song") -> str:
     value = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", value).strip(" ._")
     return value or default
+
+
+def parse_version(value: str) -> tuple[int, ...]:
+    text = (value or "").strip().lower()
+    if text.startswith("v"):
+        text = text[1:]
+    parts = re.findall(r"\d+", text)
+    return tuple(int(part) for part in parts) if parts else (0,)
+
+
+def is_newer_version(remote: str, local: str = APP_VERSION) -> bool:
+    left = list(parse_version(remote))
+    right = list(parse_version(local))
+    width = max(len(left), len(right))
+    left.extend([0] * (width - len(left)))
+    right.extend([0] * (width - len(right)))
+    return tuple(left) > tuple(right)
+
+
+def latest_release_info(timeout: int = 10) -> dict[str, object]:
+    req = Request(
+        GITHUB_API_LATEST,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": f"DaShiXiong-OneClickCover/{APP_VERSION}",
+        },
+    )
+    with urlopen(req, timeout=timeout) as resp:
+        data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    tag = str(data.get("tag_name") or "").strip()
+    assets = data.get("assets") or []
+    zip_url = ""
+    zip_name = ""
+    if isinstance(assets, list):
+        for asset in assets:
+            if not isinstance(asset, dict):
+                continue
+            name = str(asset.get("name") or "")
+            url = str(asset.get("browser_download_url") or "")
+            if name.lower().endswith(".zip") and url:
+                zip_name = name
+                zip_url = url
+                break
+    return {
+        "tag": tag,
+        "version": tag[1:] if tag.lower().startswith("v") else tag,
+        "html_url": str(data.get("html_url") or GITHUB_RELEASES_URL),
+        "zip_url": zip_url,
+        "zip_name": zip_name or f"dashixiong-one-click-cover-{tag}.zip",
+        "body": str(data.get("body") or ""),
+    }
+
+
+def check_update_available() -> dict[str, object]:
+    info = latest_release_info()
+    version = str(info.get("version") or "")
+    info["current_version"] = APP_VERSION
+    info["is_newer"] = is_newer_version(version, APP_VERSION)
+    return info
+
+
+def download_file(url: str, destination: Path, log, progress_hook=None, timeout: int = 30) -> Path:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    req = Request(url, headers={"User-Agent": f"DaShiXiong-OneClickCover/{APP_VERSION}"})
+    with urlopen(req, timeout=timeout) as resp, open(destination, "wb") as f:
+        total = int(resp.headers.get("Content-Length") or 0)
+        downloaded = 0
+        while True:
+            chunk = resp.read(1024 * 1024)
+            if not chunk:
+                break
+            f.write(chunk)
+            downloaded += len(chunk)
+            if progress_hook and total:
+                progress_hook(min(100.0, downloaded / total * 100.0))
+    log(f"下载完成：{destination} ({human_size(file_size(destination))})")
+    return destination
+
+
+def is_preserved_update_path(relative_path: Path) -> bool:
+    if not relative_path.parts:
+        return True
+    first = relative_path.parts[0]
+    first_lower = first.lower()
+    if first_lower in PRESERVE_UPDATE_TOPLEVEL:
+        return True
+    if len(relative_path.parts) == 1 and first_lower in PRESERVE_UPDATE_FILES:
+        return True
+    return False
+
+
+def find_zip_root(extract_dir: Path) -> Path:
+    children = list(extract_dir.iterdir())
+    dirs = [p for p in children if p.is_dir()]
+    files = [p for p in children if p.is_file()]
+    if len(dirs) == 1 and not files and (dirs[0] / "one_click_cover.py").exists():
+        return dirs[0]
+    return extract_dir
+
+
+def apply_update_zip(zip_path: Path, app_dir: Path, log) -> dict[str, int]:
+    if not zip_path.exists():
+        raise FileNotFoundError(f"更新包不存在：{zip_path}")
+    updates_dir = app_dir / "updates"
+    extract_dir = updates_dir / f"extract_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    if extract_dir.exists():
+        shutil.rmtree(extract_dir)
+    extract_dir.mkdir(parents=True, exist_ok=True)
+
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(extract_dir)
+    source_root = find_zip_root(extract_dir)
+
+    copied_files = 0
+    skipped_files = 0
+    created_dirs = 0
+    for src in sorted(source_root.rglob("*"), key=lambda p: len(p.parts)):
+        relative = src.relative_to(source_root)
+        if is_preserved_update_path(relative):
+            if src.is_file():
+                skipped_files += 1
+            continue
+        dst = app_dir / relative
+        if src.is_dir():
+            if not dst.exists():
+                dst.mkdir(parents=True, exist_ok=True)
+                created_dirs += 1
+            continue
+        if src.is_file():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            copied_files += 1
+
+    try:
+        shutil.rmtree(extract_dir)
+    except OSError:
+        pass
+    log(f"更新覆盖完成：复制 {copied_files} 个文件，跳过 {skipped_files} 个本地文件，创建 {created_dirs} 个目录。")
+    return {"copied_files": copied_files, "skipped_files": skipped_files, "created_dirs": created_dirs}
+
+
+def download_and_apply_update(info: dict[str, object], log, progress_hook=None) -> dict[str, int]:
+    zip_url = str(info.get("zip_url") or "")
+    if not zip_url:
+        raise RuntimeError("最新 Release 没有找到可下载的 zip 包。")
+    tag = str(info.get("tag") or "latest")
+    zip_name = safe_filename(str(info.get("zip_name") or f"update_{tag}.zip"), "update.zip")
+    updates_dir = APP_DIR / "updates"
+    package_path = updates_dir / zip_name
+    log(f"开始下载更新包：{zip_url}")
+    download_file(zip_url, package_path, log, progress_hook=progress_hook)
+    log("开始应用更新：会保留 env/logs/outputs/updates 等本地数据。")
+    result = apply_update_zip(package_path, APP_DIR, log)
+    version_file = APP_DIR / "VERSION"
+    try:
+        version_file.write_text(str(info.get("version") or tag).strip() + "\n", encoding="utf-8")
+    except OSError:
+        pass
+    return result
 
 
 def new_model_default_name() -> str:
@@ -1830,8 +2010,10 @@ class CoverApp:
         self.root.title("大尸兄一键翻唱")
         self.root.geometry("1020x780")
         self.root.minsize(940, 700)
-        self.queue: queue.Queue[str] = queue.Queue()
+        self.queue: queue.Queue[object] = queue.Queue()
         self.running = False
+        self.update_running = False
+        self.latest_update_info: dict[str, object] | None = None
         self.model_lookup: dict[str, dict[str, object]] = {}
 
         self.song = tk.StringVar()
@@ -1867,6 +2049,7 @@ class CoverApp:
         self.build_ui()
         self.refresh_models(write_log=False)
         self.root.after(200, self.poll)
+        self.root.after(1500, lambda: self.check_for_updates(auto=True))
 
     def build_ui(self):
         pad = {"padx": 10, "pady": 6}
@@ -1939,6 +2122,8 @@ class CoverApp:
         ttk.Button(actions, text="一键生成混音翻唱", command=self.start_cover).pack(side="left", padx=6)
         ttk.Button(actions, text="一键清理训练缓存", command=self.cleanup_selected_model).pack(side="left", padx=6)
         ttk.Button(actions, text="打开输出目录", command=self.open_output).pack(side="left", padx=6)
+        ttk.Button(actions, text="检查更新", command=lambda: self.check_for_updates(auto=False)).pack(side="left", padx=6)
+        ttk.Button(actions, text="一键更新", command=self.start_update).pack(side="left", padx=6)
         ttk.Checkbutton(actions, text="训练后自动清理缓存", variable=self.cleanup_after_train).pack(side="left", padx=16)
         ttk.Checkbutton(actions, text="完成后打开输出目录", variable=self.open_when_done).pack(side="left", padx=6)
 
@@ -2330,6 +2515,101 @@ class CoverApp:
     def status_threadsafe(self, message: str):
         self.queue.put(f"__STATUS__:{message}")
 
+    def update_progress_threadsafe(self, percent: float):
+        self.queue.put(("__UPDATE_PROGRESS__", float(percent)))
+
+    def check_for_updates(self, auto: bool = False):
+        if self.update_running:
+            return
+
+        def task():
+            try:
+                info = check_update_available()
+                self.queue.put(("__UPDATE_INFO__", info, auto))
+            except Exception as exc:
+                if not auto:
+                    self.queue.put(("__UPDATE_ERROR__", str(exc), auto))
+
+        if not auto:
+            self.write("正在检查 GitHub 最新版本…")
+            self.status.set("正在检查更新…")
+        threading.Thread(target=task, daemon=True).start()
+
+    def handle_update_info(self, info: dict[str, object], auto: bool = False):
+        self.latest_update_info = info
+        current = str(info.get("current_version") or APP_VERSION)
+        version = str(info.get("version") or info.get("tag") or "未知")
+        if bool(info.get("is_newer")):
+            zip_url = str(info.get("zip_url") or "")
+            self.write(f"发现新版本：v{version}（当前 v{current}）")
+            if not zip_url:
+                self.write(f"新版本没有可自动下载的 zip，请手动打开：{info.get('html_url')}")
+                if not auto:
+                    messagebox.showwarning("发现新版本", f"发现 v{version}，但没有找到 zip 包，请手动打开 Release 页面。")
+                return
+            if auto:
+                if messagebox.askyesno(
+                    "发现新版本",
+                    f"发现新版本 v{version}，当前版本 v{current}。\n\n"
+                    "是否现在一键更新？\n\n"
+                    "会保留 env、logs、outputs、updates 等本地数据。",
+                ):
+                    self.start_update()
+            else:
+                messagebox.showinfo("发现新版本", f"发现新版本 v{version}。\n点击“一键更新”即可自动下载并覆盖程序文件。")
+            self.status.set(f"发现新版本 v{version}")
+        else:
+            self.status.set(f"已是最新版本 v{current}")
+            if not auto:
+                self.write(f"已是最新版本：v{current}")
+                messagebox.showinfo("已是最新", f"当前已是最新版本：v{current}")
+
+    def start_update(self):
+        if self.running:
+            messagebox.showinfo("提示", "当前正在训练/生成/预览，请等任务结束后再更新。")
+            return
+        if self.update_running:
+            messagebox.showinfo("提示", "更新任务正在运行。")
+            return
+        info = self.latest_update_info
+        if not info or not bool(info.get("is_newer")):
+            self.write("还没有可用的新版本信息，先检查更新。")
+            self.check_for_updates(auto=False)
+            return
+        version = str(info.get("version") or info.get("tag") or "未知")
+        if not messagebox.askyesno(
+            "确认一键更新",
+            f"准备更新到 v{version}。\n\n"
+            "会覆盖程序文件，但保留：\n"
+            "- env 环境\n"
+            "- logs 模型/训练记录\n"
+            "- outputs 输出成品\n"
+            "- updates 下载包\n"
+            "- ffmpeg/ffprobe\n\n"
+            "更新完成后请关闭并重新打开窗口。继续吗？",
+        ):
+            return
+
+        self.update_running = True
+        self.status.set(f"正在更新到 v{version}…")
+        self.training_progress_text.set("更新进度：开始下载…")
+        self.training_progress_value.set(0.0)
+
+        def task():
+            try:
+                result = download_and_apply_update(
+                    info,
+                    self.log_threadsafe,
+                    progress_hook=self.update_progress_threadsafe,
+                )
+                self.queue.put(("__UPDATE_DONE__", result, version))
+            except Exception as exc:
+                self.queue.put(("__UPDATE_ERROR__", str(exc), False))
+            finally:
+                self.update_running = False
+
+        threading.Thread(target=task, daemon=True).start()
+
     def training_progress_threadsafe(self, snapshot: dict[str, object]):
         self.queue.put(("__TRAIN_PROGRESS__", snapshot))
 
@@ -2348,6 +2628,35 @@ class CoverApp:
                 if isinstance(message, tuple) and len(message) == 2 and message[0] == "__TRAIN_PROGRESS__":
                     snapshot = message[1] if isinstance(message[1], dict) else None
                     self.apply_training_progress(snapshot)
+                    continue
+                if isinstance(message, tuple) and len(message) >= 2 and message[0] == "__UPDATE_INFO__":
+                    info = message[1] if isinstance(message[1], dict) else {}
+                    auto = bool(message[2]) if len(message) >= 3 else False
+                    self.handle_update_info(info, auto=auto)
+                    continue
+                if isinstance(message, tuple) and len(message) >= 2 and message[0] == "__UPDATE_PROGRESS__":
+                    percent = max(0.0, min(100.0, float(message[1])))
+                    self.training_progress_value.set(percent)
+                    self.training_progress_text.set(f"更新进度：下载 {percent:.1f}%")
+                    self.status.set(f"正在下载更新… {percent:.1f}%")
+                    continue
+                if isinstance(message, tuple) and len(message) >= 3 and message[0] == "__UPDATE_DONE__":
+                    result = message[1] if isinstance(message[1], dict) else {}
+                    version = str(message[2])
+                    self.training_progress_value.set(100.0)
+                    self.training_progress_text.set(f"更新完成：v{version}")
+                    self.status.set("更新完成，请重启窗口")
+                    self.write(
+                        "更新完成："
+                        f"复制 {result.get('copied_files', 0)} 个文件，"
+                        f"跳过 {result.get('skipped_files', 0)} 个本地文件。"
+                    )
+                    messagebox.showinfo("更新完成", f"已更新到 v{version}。\n请关闭并重新打开“大尸兄一键翻唱”。")
+                    continue
+                if isinstance(message, tuple) and len(message) >= 2 and message[0] == "__UPDATE_ERROR__":
+                    self.status.set("更新/检查失败")
+                    self.write(f"更新/检查失败：{message[1]}")
+                    messagebox.showerror("更新失败", str(message[1]))
                     continue
                 if not isinstance(message, str):
                     continue
