@@ -1,4 +1,4 @@
-<!--
+﻿<!--
   大尸兄一键翻唱 / DaShiXiong One-Click AI Song Cover
   This project is a Windows-first local packaging and workflow layer built on top of Applio.
 -->
@@ -43,11 +43,11 @@
 
 打开 Release 页面：
 
-[https://github.com/xunaiying/dashixiong-one-click-cover/releases/tag/v1.0.1](https://github.com/xunaiying/dashixiong-one-click-cover/releases/tag/v1.0.1)
+[https://github.com/xunaiying/dashixiong-one-click-cover/releases/tag/v1.0.2](https://github.com/xunaiying/dashixiong-one-click-cover/releases/tag/v1.0.2)
 
 直接下载：
 
-[https://github.com/xunaiying/dashixiong-one-click-cover/releases/download/v1.0.1/dashixiong-one-click-cover-v1.0.1.zip](https://github.com/xunaiying/dashixiong-one-click-cover/releases/download/v1.0.1/dashixiong-one-click-cover-v1.0.1.zip)
+[https://github.com/xunaiying/dashixiong-one-click-cover/releases/download/v1.0.2/dashixiong-one-click-cover-v1.0.2.zip](https://github.com/xunaiying/dashixiong-one-click-cover/releases/download/v1.0.2/dashixiong-one-click-cover-v1.0.2.zip)
 
 解压到纯英文路径，例如：
 
@@ -401,6 +401,7 @@ Applio is made possible thanks to these projects and their references:
 <a href="https://github.com/IAHispano/Applio/graphs/contributors" target="_blank">
   <img src="https://contrib.rocks/image?repo=IAHispano/Applio" />
 </a>
+
 
 
 
