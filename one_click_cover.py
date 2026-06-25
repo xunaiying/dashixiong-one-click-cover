@@ -42,6 +42,42 @@ def new_model_default_name() -> str:
     return f"new_voice_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
 
+def model_internal_name(display_name: str) -> str:
+    """Return an ASCII-safe internal model id while allowing Chinese display names."""
+    raw = (display_name or "").strip()
+    ascii_name = re.sub(r"[^\w.-]+", "_", raw, flags=re.ASCII).strip("._-")
+    if ascii_name:
+        if ascii_name[0].isdigit():
+            ascii_name = f"voice_{ascii_name}"
+        return ascii_name
+    return new_model_default_name()
+
+
+def model_display_file(model_name: str) -> Path:
+    return LOG_DIR / model_name / "display_name.txt"
+
+
+def read_model_display_name(model_name: str) -> str:
+    path = model_display_file(model_name)
+    if path.exists():
+        try:
+            display = path.read_text(encoding="utf-8").strip()
+            if display:
+                return display
+        except OSError:
+            pass
+    return model_name
+
+
+def write_model_display_name(model_name: str, display_name: str) -> None:
+    display = (display_name or "").strip()
+    if not display or display == model_name:
+        return
+    path = model_display_file(model_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(display, encoding="utf-8")
+
+
 def run_command(args: list[str], log, cwd: Path = APP_DIR) -> None:
     env = os.environ.copy()
     env["PATH"] = str(APP_DIR) + os.pathsep + env.get("PATH", "")
@@ -97,13 +133,19 @@ def discover_models() -> list[dict[str, object]]:
         if not pth or not index:
             continue
         updated = max(pth.stat().st_mtime, index.stat().st_mtime)
+        display_name = read_model_display_name(model_dir.name)
+        if display_name != model_dir.name:
+            title = f"{display_name}  [{model_dir.name}]"
+        else:
+            title = model_dir.name
         models.append(
             {
                 "name": model_dir.name,
+                "display_name": display_name,
                 "pth": pth,
                 "index": index,
                 "updated": updated,
-                "label": f"{model_dir.name}  ({datetime.fromtimestamp(updated).strftime('%m-%d %H:%M')})",
+                "label": f"{title}  ({datetime.fromtimestamp(updated).strftime('%m-%d %H:%M')})",
             }
         )
     return sorted(models, key=lambda item: float(item["updated"]), reverse=True)
@@ -135,20 +177,46 @@ def build_index_if_possible(model_name: str, log) -> tuple[Path | None, Path | N
 
 def resolve_existing_model(model_name: str, log) -> tuple[str, Path, Path] | None:
     requested = (model_name or "").strip()
+    models = discover_models()
     if requested and requested.lower() not in {"auto", "自动", AUTO_MODEL_LABEL.lower()}:
-        resolved_name = slugify(requested)
+        requested_lower = requested.lower()
+        for item in models:
+            internal_name = str(item["name"])
+            display_name = str(item.get("display_name") or internal_name)
+            label = str(item.get("label") or "")
+            if requested in {internal_name, display_name, label} or requested_lower in {
+                internal_name.lower(),
+                display_name.lower(),
+                label.lower(),
+            }:
+                pth, index = build_index_if_possible(internal_name, log)
+                if pth and index:
+                    if display_name != internal_name:
+                        log(f"使用已识别模型：{display_name} [{internal_name}]")
+                    else:
+                        log(f"使用已识别模型：{internal_name}")
+                    return internal_name, pth, index
+
+        resolved_name = model_internal_name(requested)
         pth, index = build_index_if_possible(resolved_name, log)
         if pth and index:
-            log(f"使用已识别模型：{resolved_name}")
+            display_name = read_model_display_name(resolved_name)
+            if display_name != resolved_name:
+                log(f"使用已识别模型：{display_name} [{resolved_name}]")
+            else:
+                log(f"使用已识别模型：{resolved_name}")
             return resolved_name, pth, index
 
-    models = discover_models()
     if not models:
         return None
 
     selected = models[0]
     resolved_name = str(selected["name"])
-    log(f"自动选择最新模型：{resolved_name}")
+    display_name = str(selected.get("display_name") or resolved_name)
+    if display_name != resolved_name:
+        log(f"自动选择最新模型：{display_name} [{resolved_name}]")
+    else:
+        log(f"自动选择最新模型：{resolved_name}")
     return resolved_name, Path(selected["pth"]), Path(selected["index"])
 
 
@@ -273,19 +341,37 @@ def prepare_model(
         raise FileNotFoundError(f"声音素材文件夹里没有支持的音频文件：{voice_dir}")
 
     auto_names = {"auto", "自动", AUTO_MODEL_LABEL.lower(), TRAIN_MODEL_LABEL.lower()}
-    model_name = slugify(model_name if model_name.lower() not in auto_names else new_model_default_name())
+    requested_display_name = (model_name or "").strip()
+    if not requested_display_name or requested_display_name.lower() in auto_names:
+        requested_display_name = new_model_default_name()
+    internal_model_name = model_internal_name(requested_display_name)
+
+    if force_train:
+        for item in discover_models():
+            existing_internal = str(item["name"])
+            existing_display = str(item.get("display_name") or existing_internal)
+            if existing_display == requested_display_name and existing_internal != internal_model_name:
+                raise FileExistsError(
+                    f"模型显示名 '{requested_display_name}' 已经存在，对应内部ID：{existing_internal}\n"
+                    "为了避免误用旧模型，请换一个新的中文显示名。"
+                )
+
+    model_name = internal_model_name
     model_dir = LOG_DIR / model_name
     if force_train and model_dir.exists():
         existing_artifacts = list(model_dir.glob("*.pth")) + list(model_dir.glob("*.index"))
         if existing_artifacts:
             raise FileExistsError(
-                f"新模型名 '{model_name}' 已经存在：{model_dir}\n"
-                "为了避免误用旧 checkpoint 导致训练一秒结束，请换一个新的模型名，"
-                "例如 new_voice_2，或先手动备份/删除这个旧模型目录。"
+                f"新模型内部ID '{model_name}' 已经存在：{model_dir}\n"
+                "为了避免误用旧 checkpoint 导致训练一秒结束，请换一个新的模型显示名，"
+                "例如“阿明男声2”，或先手动备份/删除这个旧模型目录。"
             )
     cpu_cores = max(1, min(8, os.cpu_count() or 4))
     save_every = max(1, min(epochs, 10))
-    log(f"没有现成模型，开始训练 '{model_name}'，素材数量：{len(audio_files)}。")
+    if requested_display_name != model_name:
+        log(f"没有现成模型，开始训练“{requested_display_name}”（内部ID：{model_name}），素材数量：{len(audio_files)}。")
+    else:
+        log(f"没有现成模型，开始训练 '{model_name}'，素材数量：{len(audio_files)}。")
 
     run_command(
         [
@@ -391,6 +477,7 @@ def prepare_model(
             f"训练后没有生成新的 .index 索引：logs/{model_name}\n"
             "请确认特征提取成功，或重新点击训练。"
         )
+    write_model_display_name(model_name, requested_display_name)
     return model_name, pth, index
 
 
@@ -739,7 +826,7 @@ def create_cover(
         log(f"使用手动索引：{index}")
     else:
         if force_train and model_name.lower() in {"auto", "自动", AUTO_MODEL_LABEL.lower(), TRAIN_MODEL_LABEL.lower()}:
-            model_name = "new_voice"
+            model_name = new_model_default_name()
         model_name, pth, index = prepare_model(
             model_name,
             voice_dir,
@@ -758,7 +845,10 @@ def create_cover(
             pitch = estimated_pitch
 
     song_stem = safe_filename(song_path.stem)
-    model_stem = safe_filename(model_name, "model")
+    display_model_name = read_model_display_name(model_name)
+    model_stem = safe_filename(display_model_name, "model")
+    if display_model_name != model_name:
+        log(f"模型显示名：{display_model_name}（内部ID：{model_name}）")
     converted_vocals = work_dir / f"{song_stem}_{model_stem}_03_converted_vocals.wav"
     effective_index_rate = max(0.0, min(1.0, float(index_rate)))
     effective_protect = max(0.0, min(0.75, float(protect)))
@@ -1046,7 +1136,7 @@ class CoverApp:
         self.model_combo.bind("<<ComboboxSelected>>", lambda _event: self.apply_model_choice())
         ttk.Button(model_row, text="刷新", command=self.refresh_models).pack(side="left", padx=(8, 0))
         ttk.Button(model_row, text="自动识别", command=self.auto_detect_model).pack(side="left", padx=(8, 0))
-        self.entry_row(model_box, "新模型名", self.model_name)
+        self.entry_row(model_box, "新模型显示名", self.model_name)
         self.row(model_box, "训练素材文件夹", self.voice_dir, self.choose_voice_dir)
         self.row(model_box, "手动 .pth", self.pth, self.choose_pth)
         self.row(model_box, "手动 .index", self.index, self.choose_index)
@@ -1102,7 +1192,7 @@ class CoverApp:
         frame.pack(fill="x", padx=8, pady=4)
         ttk.Label(frame, text=label, width=18).pack(side="left")
         ttk.Entry(frame, textvariable=var).pack(side="left", fill="x", expand=True)
-        ttk.Label(frame, text="训练新模型时使用", foreground="#666").pack(side="left", padx=(8, 0))
+        ttk.Label(frame, text="可填中文；内部自动生成安全ID", foreground="#666").pack(side="left", padx=(8, 0))
 
     def labeled_entry(self, parent, label, var, row, col):
         ttk.Label(parent, text=label).grid(row=row, column=col, sticky="w", padx=6, pady=4)
@@ -1140,7 +1230,11 @@ class CoverApp:
                 latest = next(iter(self.model_lookup.values()))
                 self.pth.set(str(latest["pth"]))
                 self.index.set(str(latest["index"]))
-                self.status.set(f"自动模式将使用：{latest['name']}")
+                latest_display = str(latest.get("display_name") or latest["name"])
+                if latest_display != str(latest["name"]):
+                    self.status.set(f"自动模式将使用：{latest_display} [{latest['name']}]")
+                else:
+                    self.status.set(f"自动模式将使用：{latest['name']}")
             else:
                 self.pth.set("")
                 self.index.set("")
@@ -1148,17 +1242,17 @@ class CoverApp:
             return
         if choice == TRAIN_MODEL_LABEL:
             current_name = self.model_name.get().strip()
-            current_slug = slugify(current_name) if current_name else ""
+            current_internal = model_internal_name(current_name) if current_name else ""
             if (
-                current_name.lower() in {"", "auto", "自动", AUTO_MODEL_LABEL.lower()}
-                or (current_slug and (LOG_DIR / current_slug).exists())
+                current_name.lower() in {"", "auto", "自动", AUTO_MODEL_LABEL.lower(), TRAIN_MODEL_LABEL.lower()}
+                or (current_internal and (LOG_DIR / current_internal).exists())
             ):
                 self.model_name.set(new_model_default_name())
             self.pth.set("")
             self.index.set("")
-            self.status.set("训练新模型：已生成不冲突的新模型名，请选择新声音素材文件夹")
+            self.status.set("训练新模型：显示名可填中文，请选择新声音素材文件夹")
             if write_log:
-                self.write("已切换到训练新模型模式。请使用新的模型名，避免覆盖/续训旧模型。")
+                self.write("已切换到训练新模型模式。显示名可填中文，程序会自动使用英文安全ID，避免覆盖/续训旧模型。")
             return
         if choice == MANUAL_MODEL_LABEL:
             self.status.set("手动模型模式")
@@ -1168,9 +1262,16 @@ class CoverApp:
             self.model_name.set(str(item["name"]))
             self.pth.set(str(item["pth"]))
             self.index.set(str(item["index"]))
-            self.status.set(f"已选择模型：{item['name']}")
+            display_name = str(item.get("display_name") or item["name"])
+            if display_name != str(item["name"]):
+                self.status.set(f"已选择模型：{display_name} [{item['name']}]")
+            else:
+                self.status.set(f"已选择模型：{item['name']}")
             if write_log:
-                self.write(f"已选择模型：{item['name']}")
+                if display_name != str(item["name"]):
+                    self.write(f"已选择模型：{display_name} [{item['name']}]")
+                else:
+                    self.write(f"已选择模型：{item['name']}")
 
     def choose_song(self):
         path = filedialog.askopenfilename(filetypes=[("Audio", "*.wav *.mp3 *.flac *.m4a *.ogg *.aac *.mp4 *.webm"), ("All files", "*.*")])
@@ -1276,14 +1377,31 @@ class CoverApp:
         if train_mode:
             new_name = self.model_name.get().strip()
             if not new_name or new_name.lower() in {"auto", "自动", AUTO_MODEL_LABEL.lower(), TRAIN_MODEL_LABEL.lower()}:
-                messagebox.showerror("缺少新模型名", "请给这次新声音填写一个模型名，例如 my_voice_2。")
+                messagebox.showerror("缺少新模型显示名", "请给这次新声音填写一个显示名，例如“阿明男声”或 my_voice_2。")
                 return
-            new_slug = slugify(new_name)
-            if (LOG_DIR / new_slug).exists():
+            new_internal = model_internal_name(new_name)
+            duplicate_display = next(
+                (
+                    item
+                    for item in discover_models()
+                    if str(item.get("display_name") or item["name"]) == new_name
+                ),
+                None,
+            )
+            if duplicate_display:
                 messagebox.showerror(
-                    "模型名已存在",
-                    f"模型 logs/{new_slug} 已经存在。\n\n"
-                    "请换一个全新的模型名，例如 new_voice_2 或 "
+                    "模型显示名已存在",
+                    f"显示名“{new_name}”已经存在，对应内部ID：{duplicate_display['name']}。\n\n"
+                    "请换一个新的中文显示名，例如“阿明男声2”。\n\n"
+                    "原因：同名旧模型会从旧 checkpoint 继续，如果旧模型已到默认训练轮数，"
+                    "训练会很快结束并继续使用旧权重。"
+                )
+                return
+            if (LOG_DIR / new_internal).exists():
+                messagebox.showerror(
+                    "模型内部ID已存在",
+                    f"模型 logs/{new_internal} 已经存在。\n\n"
+                    "请换一个全新的显示名，例如“阿明男声2”或 "
                     f"{new_model_default_name()}。\n\n"
                     "原因：同名旧模型会从旧 checkpoint 继续，如果旧模型已到默认训练轮数，"
                     "训练会很快结束并继续使用旧权重。"
