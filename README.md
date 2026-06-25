@@ -13,7 +13,7 @@
 
 - **一键翻唱窗口**：双击 `run-one-click-cover.bat` 或 `大尸兄一键翻唱.bat` 打开。
 - **自动识别模型**：自动查找 `logs/<模型名>` 下可用的 `.pth` 与 `.index`。
-- **训练新声音模型**：选择“训练新模型”，填入模型名并选择新声音素材文件夹。
+- **训练新声音模型**：选择“训练新模型”，填入模型显示名并选择新声音素材文件夹；显示名支持中文，内部自动使用安全英文 ID。
 - **自动分离歌曲**：调用 Demucs 把歌曲拆成原唱人声与伴奏。
 - **自动估算变调**：按歌曲人声和目标模型自动估算 pitch shift。
 - **咬字清晰模式**：默认提高辅音保护并限制过高索引强度，减少糊字。
@@ -24,7 +24,7 @@
 
 - **One-click cover UI**: launch with `run-one-click-cover.bat` or `大尸兄一键翻唱.bat`.
 - **Automatic model discovery**: finds available `.pth` and `.index` files under `logs/<model_name>`.
-- **New voice training**: train a new local RVC model from your own clean voice samples.
+- **New voice training**: train a new local RVC model from your own clean voice samples; Chinese display names are supported with an automatic ASCII-safe internal ID.
 - **Song separation**: uses Demucs to split the source song into vocals and instrumental.
 - **Automatic pitch estimation**: estimates a suitable pitch shift for the selected voice model.
 - **Pronunciation clarity mode**: improves consonant protection and avoids overly blurry index settings.
@@ -43,11 +43,11 @@
 
 打开 Release 页面：
 
-[https://github.com/xunaiying/dashixiong-one-click-cover/releases/tag/v1.0.2](https://github.com/xunaiying/dashixiong-one-click-cover/releases/tag/v1.0.2)
+[https://github.com/xunaiying/dashixiong-one-click-cover/releases/tag/v1.0.3](https://github.com/xunaiying/dashixiong-one-click-cover/releases/tag/v1.0.3)
 
 直接下载：
 
-[https://github.com/xunaiying/dashixiong-one-click-cover/releases/download/v1.0.2/dashixiong-one-click-cover-v1.0.2.zip](https://github.com/xunaiying/dashixiong-one-click-cover/releases/download/v1.0.2/dashixiong-one-click-cover-v1.0.2.zip)
+[https://github.com/xunaiying/dashixiong-one-click-cover/releases/download/v1.0.3/dashixiong-one-click-cover-v1.0.3.zip](https://github.com/xunaiying/dashixiong-one-click-cover/releases/download/v1.0.3/dashixiong-one-click-cover-v1.0.3.zip)
 
 解压到纯英文路径，例如：
 
