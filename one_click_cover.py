@@ -121,6 +121,153 @@ def find_model_files(model_name: str) -> tuple[Path | None, Path | None]:
     return latest_file(pth_candidates), latest_file(index_candidates)
 
 
+def human_size(num_bytes: int | float) -> str:
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def resolve_model_for_cleanup(model_name: str) -> tuple[str, Path, Path, str]:
+    requested = (model_name or "").strip()
+    models = discover_models()
+    auto_names = {"", "auto", "自动", AUTO_MODEL_LABEL.lower(), TRAIN_MODEL_LABEL.lower()}
+
+    selected: dict[str, object] | None = None
+    if requested.lower() in auto_names:
+        selected = models[0] if models else None
+    else:
+        requested_lower = requested.lower()
+        for item in models:
+            internal_name = str(item["name"])
+            display_name = str(item.get("display_name") or internal_name)
+            label = str(item.get("label") or "")
+            if requested in {internal_name, display_name, label} or requested_lower in {
+                internal_name.lower(),
+                display_name.lower(),
+                label.lower(),
+            }:
+                selected = item
+                break
+        if selected is None:
+            internal_name = model_internal_name(requested)
+            pth, index = find_model_files(internal_name)
+            if pth and index:
+                display_name = read_model_display_name(internal_name)
+                return internal_name, pth, index, display_name
+
+    if selected is None:
+        raise FileNotFoundError("没有找到可清理的模型。请先选择一个已有模型，或训练完成后再清理。")
+
+    internal_name = str(selected["name"])
+    pth, index = find_model_files(internal_name)
+    if not pth or not index:
+        raise FileNotFoundError(f"模型不完整，无法清理：logs/{internal_name} 里没有同时找到 .pth 和 .index。")
+    display_name = str(selected.get("display_name") or internal_name)
+    return internal_name, pth, index, display_name
+
+
+def is_model_training_active(model_name: str) -> bool:
+    """Best-effort guard: avoid deleting cache while this model is still training."""
+    if os.name != "nt" or not model_name:
+        return False
+    script = r"""
+$name = $env:APPLIO_MODEL_NAME
+Get-CimInstance Win32_Process |
+  Where-Object {
+    $_.CommandLine -and
+    $_.CommandLine.Contains($name) -and
+    ($_.CommandLine -match 'core\.py\s+train|rvc\\train\\train\.py')
+  } |
+  Select-Object -First 1 -ExpandProperty ProcessId
+"""
+    env = os.environ.copy()
+    env["APPLIO_MODEL_NAME"] = model_name
+    try:
+        out = subprocess.check_output(
+            ["powershell", "-NoProfile", "-Command", script],
+            env=env,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        ).strip()
+    except Exception:
+        return False
+    return bool(out)
+
+
+def cleanup_model_training_cache(model_name: str, log=None) -> dict[str, object]:
+    """Delete heavy RVC training cache while keeping the usable voice model files."""
+    if log is None:
+        log = lambda _message: None
+
+    internal_name, pth, index, display_name = resolve_model_for_cleanup(model_name)
+    model_dir = (LOG_DIR / internal_name).resolve()
+    logs_root = LOG_DIR.resolve()
+    if logs_root not in model_dir.parents and model_dir != logs_root:
+        raise RuntimeError(f"拒绝清理非模型目录：{model_dir}")
+    if is_model_training_active(internal_name):
+        raise RuntimeError(f"模型仍在训练中，暂不能清理：{display_name} [{internal_name}]")
+
+    keep_paths = {pth.resolve(), index.resolve()}
+    for name in ("display_name.txt", "config.json", "model_info.json"):
+        keep_file = model_dir / name
+        if keep_file.exists():
+            keep_paths.add(keep_file.resolve())
+
+    deleted_files = 0
+    deleted_dirs = 0
+    reclaimed = 0
+
+    for file_path in sorted(model_dir.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+        if not file_path.is_file():
+            continue
+        resolved = file_path.resolve()
+        if resolved in keep_paths:
+            continue
+        reclaimed += file_size(file_path)
+        file_path.unlink()
+        deleted_files += 1
+
+    for dir_path in sorted(
+        [p for p in model_dir.rglob("*") if p.is_dir()],
+        key=lambda p: len(p.parts),
+        reverse=True,
+    ):
+        try:
+            next(dir_path.iterdir())
+        except StopIteration:
+            dir_path.rmdir()
+            deleted_dirs += 1
+        except OSError:
+            pass
+
+    kept = "\n".join(f"  - {p}" for p in sorted(keep_paths, key=lambda item: str(item).lower()))
+    log(f"清理完成：{display_name} [{internal_name}]")
+    log(f"已释放约 {human_size(reclaimed)}，删除 {deleted_files} 个缓存文件、{deleted_dirs} 个空目录。")
+    log("已保留声音模型文件：\n" + kept)
+    return {
+        "model_name": internal_name,
+        "display_name": display_name,
+        "reclaimed": reclaimed,
+        "deleted_files": deleted_files,
+        "deleted_dirs": deleted_dirs,
+        "kept_pth": pth,
+        "kept_index": index,
+    }
+
+
 def discover_models() -> list[dict[str, object]]:
     if not LOG_DIR.exists():
         return []
@@ -1104,6 +1251,7 @@ class CoverApp:
         self.instrumental_gain = tk.DoubleVar(value=1.0)
         self.gpu = tk.StringVar(value="0")
         self.open_when_done = tk.BooleanVar(value=True)
+        self.cleanup_after_train = tk.BooleanVar(value=True)
         self.status = tk.StringVar(value="就绪")
 
         self.build_ui()
@@ -1164,8 +1312,10 @@ class CoverApp:
         actions.pack(fill="x", **pad)
         ttk.Button(actions, text="安装/检查依赖", command=self.install_deps).pack(side="left", padx=6)
         ttk.Button(actions, text="一键生成混音翻唱", command=self.start_cover).pack(side="left", padx=6)
+        ttk.Button(actions, text="一键清理训练缓存", command=self.cleanup_selected_model).pack(side="left", padx=6)
         ttk.Button(actions, text="打开输出目录", command=self.open_output).pack(side="left", padx=6)
-        ttk.Checkbutton(actions, text="完成后打开输出目录", variable=self.open_when_done).pack(side="left", padx=16)
+        ttk.Checkbutton(actions, text="训练后自动清理缓存", variable=self.cleanup_after_train).pack(side="left", padx=16)
+        ttk.Checkbutton(actions, text="完成后打开输出目录", variable=self.open_when_done).pack(side="left", padx=6)
 
         status_bar = ttk.Frame(self.root)
         status_bar.pack(fill="x", padx=10, pady=(0, 6))
@@ -1313,6 +1463,68 @@ class CoverApp:
         path.mkdir(parents=True, exist_ok=True)
         os.startfile(str(path))
 
+    def cleanup_target_model_name(self) -> str:
+        choice = self.model_choice.get()
+        item = self.model_lookup.get(choice)
+        if item:
+            return str(item["name"])
+        if choice == AUTO_MODEL_LABEL and self.model_lookup:
+            return str(next(iter(self.model_lookup.values()))["name"])
+        if choice == MANUAL_MODEL_LABEL and self.pth.get():
+            try:
+                relative = Path(self.pth.get()).resolve().relative_to(LOG_DIR.resolve())
+                if relative.parts:
+                    return relative.parts[0]
+            except ValueError:
+                pass
+        return self.model_name.get().strip() or "auto"
+
+    def cleanup_selected_model(self):
+        if self.running:
+            messagebox.showinfo("提示", "已有任务正在运行，请等训练/生成结束后再清理。")
+            return
+        target = self.cleanup_target_model_name()
+        try:
+            internal_name, pth, index, display_name = resolve_model_for_cleanup(target)
+        except Exception as exc:
+            messagebox.showerror("无法清理", str(exc))
+            return
+        if is_model_training_active(internal_name):
+            messagebox.showwarning("训练仍在进行", f"模型仍在训练中，暂不能清理：{display_name} [{internal_name}]")
+            return
+
+        ok = messagebox.askyesno(
+            "确认清理训练缓存",
+            f"将清理模型：{display_name} [{internal_name}]\n\n"
+            "会保留：\n"
+            f"- 最新声音权重：{pth.name}\n"
+            f"- 最新索引文件：{index.name}\n"
+            "- 中文显示名/少量配置文件\n\n"
+            "会删除：\n"
+            "- sliced_audios / extracted / f0 / eval 等训练缓存\n"
+            "- G_*.pth / D_*.pth 续训 checkpoint\n"
+            "- 旧 epoch 权重和其它训练过程文件\n\n"
+            "删除后不可恢复，但不影响正常翻唱。确定继续吗？",
+        )
+        if not ok:
+            return
+
+        self.running = True
+        self.status.set("正在清理训练缓存…")
+
+        def task():
+            try:
+                result = cleanup_model_training_cache(internal_name, self.log_threadsafe)
+                self.status_threadsafe(f"清理完成，释放约 {human_size(int(result['reclaimed']))}")
+            except Exception as exc:
+                self.log_threadsafe(f"清理失败：{exc}")
+                self.status_threadsafe("清理失败")
+            finally:
+                self.running = False
+                self.queue.put("__REFRESH_MODELS__")
+
+        threading.Thread(target=task, daemon=True).start()
+
     def write(self, message: str):
         self.log.insert("end", message + "\n")
         self.log.see("end")
@@ -1371,6 +1583,7 @@ class CoverApp:
         choice = self.model_choice.get()
         manual_mode = choice == MANUAL_MODEL_LABEL
         train_mode = choice == TRAIN_MODEL_LABEL
+        auto_cleanup_after_train = bool(self.cleanup_after_train.get())
         if manual_mode and (not self.pth.get() or not self.index.get()):
             messagebox.showerror("模型不完整", "手动模型模式需要同时选择 .pth 和 .index。")
             return
@@ -1451,6 +1664,14 @@ class CoverApp:
                     force_train=train_mode,
                 )
                 self.log_threadsafe(f"生成完成：{result}")
+                if train_mode and auto_cleanup_after_train:
+                    try:
+                        self.log_threadsafe("训练任务完成，开始自动清理训练缓存，只保留声音模型。")
+                        cleaned = cleanup_model_training_cache(model_name, self.log_threadsafe)
+                        self.status_threadsafe(f"生成完成，已清理 {human_size(int(cleaned['reclaimed']))}")
+                    except Exception as cleanup_exc:
+                        self.log_threadsafe(f"生成已完成，但自动清理失败：{cleanup_exc}")
+                        self.status_threadsafe("生成完成，自动清理失败")
                 if self.open_when_done.get():
                     os.startfile(str(Path(result).parent))
             except Exception as exc:
