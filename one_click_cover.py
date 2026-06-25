@@ -26,7 +26,8 @@ LOG_DIR = APP_DIR / "logs"
 AUTO_MODEL_LABEL = "自动选择最新可用模型"
 TRAIN_MODEL_LABEL = "训练新模型（使用新声音）"
 MANUAL_MODEL_LABEL = "手动选择 .pth + .index"
-APP_VERSION = "1.0.9"
+APP_VERSION = "1.0.10"
+CORE_PROTECT_MAX = 0.50
 GITHUB_REPO = "xunaiying/dashixiong-one-click-cover"
 GITHUB_API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 GITHUB_RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -58,6 +59,18 @@ def slugify(value: str) -> str:
 def safe_filename(value: str, default: str = "song") -> str:
     value = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", value).strip(" ._")
     return value or default
+
+
+def remove_dir_quietly(path: Path, log=None, label: str = "临时目录") -> None:
+    """Best-effort cleanup for generated working files."""
+    try:
+        if path.exists():
+            shutil.rmtree(path)
+            if log:
+                log(f"已清理{label}：{path}")
+    except Exception as exc:
+        if log:
+            log(f"{label}清理失败，可手动删除：{path}（{exc}）")
 
 
 def parse_version(value: str) -> tuple[int, ...]:
@@ -1147,7 +1160,10 @@ def infer_vocals(
     log,
 ) -> Path:
     index_rate = max(0.0, min(1.0, float(index_rate)))
-    protect = max(0.0, min(0.75, float(protect)))
+    raw_protect = float(protect)
+    protect = max(0.0, min(CORE_PROTECT_MAX, raw_protect))
+    if abs(protect - raw_protect) > 1e-6:
+        log(f"辅音保护 {raw_protect:.2f} 超出当前 Applio 支持范围，已自动改为 {protect:.2f}。")
     log(f"推理参数：变调 {pitch:+d}，索引强度 {index_rate:.2f}，辅音保护 {protect:.2f}")
     run_command(
         [
@@ -1443,7 +1459,8 @@ def create_cover(
     output_dir.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-    work_dir = output_dir / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}_{safe_filename(song_path.stem)}"
+    run_stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    work_dir = output_dir / "_work" / f"{run_stamp}_{safe_filename(song_path.stem)}"
     work_dir.mkdir(parents=True, exist_ok=True)
 
     if pth_path and index_path:
@@ -1479,10 +1496,10 @@ def create_cover(
         log(f"模型显示名：{display_model_name}（内部ID：{model_name}）")
     converted_vocals = work_dir / f"{song_stem}_{model_stem}_03_converted_vocals.wav"
     effective_index_rate = max(0.0, min(1.0, float(index_rate)))
-    effective_protect = max(0.0, min(0.75, float(protect)))
+    effective_protect = max(0.0, min(CORE_PROTECT_MAX, float(protect)))
     if clarity_mode:
         effective_index_rate = min(effective_index_rate, 0.45)
-        effective_protect = max(effective_protect, 0.50)
+        effective_protect = max(effective_protect, CORE_PROTECT_MAX)
         log(
             "咬字清晰模式已开启："
             f"索引强度控制为 {effective_index_rate:.2f}，辅音保护提高到 {effective_protect:.2f}"
@@ -1490,8 +1507,7 @@ def create_cover(
     else:
         log("咬字清晰模式已关闭：使用当前索引强度和辅音保护。")
     infer_vocals(vocals, pth, index, converted_vocals, pitch, effective_index_rate, effective_protect, log)
-    final_path = output_dir / f"{work_dir.name}_{model_stem}_mixed_cover.mp3"
-    latest_path = output_dir / f"{song_stem}_{model_stem}_mixed_cover.mp3"
+    final_path = output_dir / f"{run_stamp}_{song_stem}_{model_stem}_翻唱成品.mp3"
     mix_cover(
         converted_vocals,
         instrumental,
@@ -1502,11 +1518,8 @@ def create_cover(
         reference_vocal_path=vocals,
         auto_mix=auto_mix,
     )
-    if latest_path != final_path:
-        shutil.copy2(final_path, latest_path)
     log(f"完成混音成品：{final_path}")
-    log(f"最新成品副本：{latest_path}")
-    log(f"中间文件目录：{work_dir}")
+    remove_dir_quietly(work_dir, log, "一键翻唱临时目录")
     return final_path
 
 
@@ -1552,7 +1565,8 @@ def create_voice_preview(
 
     song_stem = safe_filename(song_path.stem)
     model_stem = safe_filename(display_model_name, "model")
-    work_dir = preview_root / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}_{song_stem}_{model_stem}_preview"
+    run_stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    work_dir = preview_root / "_work" / f"{run_stamp}_{song_stem}_{model_stem}_preview"
     work_dir.mkdir(parents=True, exist_ok=True)
 
     original_mix = work_dir / f"{song_stem}_00_original_mix_preview.mp3"
@@ -1570,10 +1584,10 @@ def create_voice_preview(
             pitch = estimated_pitch
 
     effective_index_rate = max(0.0, min(1.0, float(index_rate)))
-    effective_protect = max(0.0, min(0.75, float(protect)))
+    effective_protect = max(0.0, min(CORE_PROTECT_MAX, float(protect)))
     if clarity_mode:
         effective_index_rate = min(effective_index_rate, 0.45)
-        effective_protect = max(effective_protect, 0.50)
+        effective_protect = max(effective_protect, CORE_PROTECT_MAX)
         log(
             "预览咬字清晰模式已开启："
             f"索引强度 {effective_index_rate:.2f}，辅音保护 {effective_protect:.2f}"
@@ -1612,15 +1626,11 @@ def create_voice_preview(
 
     log(f"原唱预览：{latest_original}")
     log(f"翻唱预览：{latest_cover}")
-    log(f"原唱人声预览：{original_vocals}")
-    log(f"翻唱人声预览：{converted_vocals}")
-    log(f"预览中间文件目录：{work_dir}")
+    remove_dir_quietly(work_dir, log, "声音预览临时目录")
     return {
         "original_mix": latest_original,
         "cover_mix": latest_cover,
-        "original_vocals": original_vocals,
-        "cover_vocals": converted_vocals,
-        "work_dir": work_dir,
+        "work_dir": preview_root,
     }
 
 
@@ -1659,7 +1669,7 @@ def index_matrix_candidates(base_index: float) -> list[float]:
 
 
 def protect_matrix_candidates(base_protect: float) -> list[float]:
-    return unique_float_candidates([base_protect, 0.60, 0.45, 0.70], 0.0, 0.75, 2)
+    return unique_float_candidates([base_protect, 0.35, 0.45, CORE_PROTECT_MAX], 0.0, CORE_PROTECT_MAX, 2)
 
 
 def parameter_slug(pitch: int, index_rate: float, protect: float) -> str:
@@ -1713,16 +1723,17 @@ def create_parameter_preview_matrix(
     if matrix_duration < float(duration_seconds):
         log(f"矩阵试听为节省时间，单段时长限制为 {matrix_duration:.1f}s。")
 
-    work_dir = preview_root / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}_{song_stem}_{model_stem}_matrix"
+    run_stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    result_dir = preview_root / f"{run_stamp}_{song_stem}_{model_stem}_matrix"
+    work_dir = preview_root / "_work" / f"{run_stamp}_{song_stem}_{model_stem}_matrix"
+    result_dir.mkdir(parents=True, exist_ok=True)
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    original_mix = work_dir / f"{song_stem}_00_original_mix_matrix.mp3"
+    original_mix = work_dir / "original_mix.mp3"
     extract_audio_segment(song_path, original_mix, start_seconds, matrix_duration, log)
     vocals, instrumental = separate_song(original_mix, work_dir, log)
-    original_vocals = work_dir / f"{song_stem}_01_original_vocals_matrix.wav"
-    original_instrumental = work_dir / f"{song_stem}_02_instrumental_matrix.wav"
-    shutil.copy2(vocals, original_vocals)
-    shutil.copy2(instrumental, original_instrumental)
+    original_vocals = vocals
+    original_instrumental = instrumental
 
     estimated_pitch: int | None = None
     if auto_pitch:
@@ -1755,7 +1766,7 @@ def create_parameter_preview_matrix(
         "",
         "建议听法：先听混音 mp3；咬字糊就选 protect 高一点；不像本人就选 index 高一点；音高怪就换 pitch。",
         "",
-        "文件\tpitch\tindex_rate\tprotect",
+        "文件\tpitch\tindex_rate\tprotect\t状态",
     ]
 
     total = len(combinations)
@@ -1767,45 +1778,56 @@ def create_parameter_preview_matrix(
             f"pitch {candidate_pitch:+d}, index {candidate_index:.2f}, protect {candidate_protect:.2f}"
         )
         converted_vocals = work_dir / f"{prefix}_cover_vocals.wav"
-        infer_vocals(
-            original_vocals,
-            pth,
-            index,
-            converted_vocals,
-            candidate_pitch,
-            candidate_index,
-            candidate_protect,
-            log,
-        )
-        cover_mix = work_dir / f"{prefix}_cover_mix.mp3"
-        mix_cover(
-            converted_vocals,
-            original_instrumental,
-            cover_mix,
-            log,
-            vocal_gain=vocal_gain,
-            instrumental_gain=instrumental_gain,
-            reference_vocal_path=original_vocals,
-            auto_mix=auto_mix,
-        )
+        cover_mix = result_dir / f"{prefix}_翻唱混音.mp3"
+        try:
+            infer_vocals(
+                original_vocals,
+                pth,
+                index,
+                converted_vocals,
+                candidate_pitch,
+                candidate_index,
+                candidate_protect,
+                log,
+            )
+            mix_cover(
+                converted_vocals,
+                original_instrumental,
+                cover_mix,
+                log,
+                vocal_gain=vocal_gain,
+                instrumental_gain=instrumental_gain,
+                reference_vocal_path=original_vocals,
+                auto_mix=auto_mix,
+            )
+        except Exception as exc:
+            reason = f"{type(exc).__name__}: {exc}"
+            log(f"[{number}/{total}] 此组试听失败，已跳过：{reason}")
+            summary_lines.append(
+                f"{prefix}_FAILED\t{candidate_pitch:+d}\t{candidate_index:.2f}\t{candidate_protect:.2f}\t失败：{reason}"
+            )
+            continue
         cover_files.append(cover_mix)
         summary_lines.append(
-            f"{cover_mix.name}\t{candidate_pitch:+d}\t{candidate_index:.2f}\t{candidate_protect:.2f}"
+            f"{cover_mix.name}\t{candidate_pitch:+d}\t{candidate_index:.2f}\t{candidate_protect:.2f}\t成功"
         )
 
-    latest_original = preview_root / f"{song_stem}_matrix_original_preview.mp3"
+    latest_original = result_dir / "00_原唱片段.mp3"
     shutil.copy2(original_mix, latest_original)
-    summary_path = work_dir / "参数试听矩阵说明.txt"
+    summary_path = result_dir / "参数试听矩阵说明.txt"
     summary_path.write_text("\n".join(summary_lines), encoding="utf-8")
 
     log(f"矩阵原唱预览：{latest_original}")
-    log(f"矩阵试听目录：{work_dir}")
+    log(f"矩阵试听目录：{result_dir}")
     log(f"矩阵说明文件：{summary_path}")
+    remove_dir_quietly(work_dir, log, "参数矩阵临时目录")
     if cover_files:
         log(f"第一条矩阵试听：{cover_files[0]}")
+    else:
+        raise RuntimeError(f"矩阵试听全部失败，请查看说明文件：{summary_path}")
     return {
         "original_mix": latest_original,
-        "matrix_dir": work_dir,
+        "matrix_dir": result_dir,
         "summary": summary_path,
         "cover_files": cover_files,
         "first_cover": cover_files[0] if cover_files else None,

@@ -19,7 +19,7 @@
 - **自动估算变调**：按歌曲人声和目标模型自动估算 pitch shift。
 - **咬字清晰模式**：默认提高辅音保护并限制过高索引强度，减少糊字。
 - **智能混音**：参考原唱人声/伴奏比例，自动匹配翻唱人声与伴奏音量，并做轻微伴奏让位。
-- **完整成品输出**：输出带伴奏、带混音和响度处理的 `*_mixed_cover.mp3`。
+- **完整成品输出**：输出带伴奏、带混音和响度处理的 `*_翻唱成品.mp3`，成功后自动清理中间人声/伴奏文件。
 - **原唱/翻唱对比预览**：截取短片段生成原唱预览和翻唱后预览，可直接播放对比音色与咬字。
 - **自动参数试听矩阵**：一键批量生成多组短试听，对比不同变调、索引强度和辅音保护，快速找到最自然参数。
 - **自动更新提示**：启动时检查 GitHub 最新 Release，发现新版可一键下载覆盖程序文件，并保留本地环境、模型和输出。
@@ -35,7 +35,7 @@
 - **Automatic pitch estimation**: estimates a suitable pitch shift for the selected voice model.
 - **Pronunciation clarity mode**: improves consonant protection and avoids overly blurry index settings.
 - **Smart auto-mixing**: matches the original song's vocal/instrumental balance and applies light backing-track ducking.
-- **Finished mixed output**: exports a mastered `*_mixed_cover.mp3` instead of vocal-only audio.
+- **Finished mixed output**: exports a mastered `*_翻唱成品.mp3` instead of vocal-only audio and cleans temporary stems automatically.
 - **Original/cover A-B preview**: generates short original and converted preview clips for quick voice and pronunciation checks.
 - **Automatic parameter preview matrix**: batch-generates short clips with different pitch, index rate, and protect settings for quick A/B tuning.
 - **Auto update prompt**: checks the latest GitHub Release and can update program files in-place while preserving local env, models, and outputs.
@@ -53,11 +53,11 @@
 
 打开 Release 页面：
 
-[https://github.com/xunaiying/dashixiong-one-click-cover/releases/tag/v1.0.9](https://github.com/xunaiying/dashixiong-one-click-cover/releases/tag/v1.0.9)
+[https://github.com/xunaiying/dashixiong-one-click-cover/releases/tag/v1.0.10](https://github.com/xunaiying/dashixiong-one-click-cover/releases/tag/v1.0.10)
 
 直接下载：
 
-[https://github.com/xunaiying/dashixiong-one-click-cover/releases/download/v1.0.9/dashixiong-one-click-cover-v1.0.9.zip](https://github.com/xunaiying/dashixiong-one-click-cover/releases/download/v1.0.9/dashixiong-one-click-cover-v1.0.9.zip)
+[https://github.com/xunaiying/dashixiong-one-click-cover/releases/download/v1.0.10/dashixiong-one-click-cover-v1.0.10.zip](https://github.com/xunaiying/dashixiong-one-click-cover/releases/download/v1.0.10/dashixiong-one-click-cover-v1.0.10.zip)
 
 解压到纯英文路径，例如：
 
@@ -221,6 +221,17 @@ run-ui.bat
 outputs\covers
 ```
 
+
+### 输出目录更清爽 / Cleaner output folders
+
+成功生成后默认只保留真正需要试听或发布的结果：
+
+- 普通一键翻唱：`outputs\covers\时间_歌曲_模型_翻唱成品.mp3`
+- 声音预览：`outputs\covers\previews\*_original_preview.mp3` 与 `*_cover_preview.mp3`
+- 参数试听矩阵：矩阵目录内只保留 `00_原唱片段.mp3`、每组 `*_翻唱混音.mp3` 和 `参数试听矩阵说明.txt`
+
+人声/伴奏分离文件、RVC 中间 wav、临时工作目录会在成功后自动清理。
+
 ### 6. 训练素材建议 / Voice sample recommendations
 
 - 推荐 10–30 分钟清晰干声。
@@ -251,7 +262,7 @@ English:
 
 #### 咬字不清怎么办？
 
-保持“咬字清晰模式”开启；可以把“辅音保护”调到 `0.55`–`0.65`，并适当降低“索引强度”。
+保持“咬字清晰模式”开启；可以把“辅音保护”保持在 `0.45`–`0.50`，并适当降低“索引强度”。
 
 ### 8. 补充文档 / Extra docs
 
@@ -364,7 +375,7 @@ The one-click song cover tool now defaults to the complete cover workflow:
 - Estimates the pitch shift from the song vocal and the selected voice model.
 - Converts the vocal, then automatically matches the original song's vocal/instrumental balance.
 - Applies a small automatic accompaniment ducking effect while the new vocal is present, then masters the result.
-- Writes the final mastered file as `*_mixed_cover.mp3` under `outputs/covers`.
+- Writes one final mastered `*_翻唱成品.mp3` under `outputs/covers` and removes temporary vocal/instrumental working files after success.
 
 In the one-click cover window, **Auto match original mix** is enabled by default.  
 The **Vocal trim** and **Instrumental trim** fields are now fine-tuning multipliers:
@@ -379,7 +390,7 @@ For clearer pronunciation, **Pronunciation clarity mode** is enabled by default 
 - It raises consonant protection to help preserve s, t, k, sh, ch, breath and word endings.
 - It prevents excessive index strength from making the converted vocal sound too thick or blurry.
 - If the voice becomes less similar to the model, lower **Consonant protect** slightly, for example from `0.50` to `0.40`.
-- If consonants are still unclear, try **Consonant protect** around `0.55` to `0.65`.
+- If consonants are still unclear, try **Consonant protect** around `0.45` to `0.50` (the current Applio CLI accepts up to `0.50`).
 
 To train a new voice from a new voice folder in the one-click cover window:
 
@@ -411,6 +422,7 @@ Applio is made possible thanks to these projects and their references:
 <a href="https://github.com/IAHispano/Applio/graphs/contributors" target="_blank">
   <img src="https://contrib.rocks/image?repo=IAHispano/Applio" />
 </a>
+
 
 
 
