@@ -38,6 +38,10 @@ def safe_filename(value: str, default: str = "song") -> str:
     return value or default
 
 
+def new_model_default_name() -> str:
+    return f"new_voice_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+
 def run_command(args: list[str], log, cwd: Path = APP_DIR) -> None:
     env = os.environ.copy()
     env["PATH"] = str(APP_DIR) + os.pathsep + env.get("PATH", "")
@@ -269,7 +273,16 @@ def prepare_model(
         raise FileNotFoundError(f"声音素材文件夹里没有支持的音频文件：{voice_dir}")
 
     auto_names = {"auto", "自动", AUTO_MODEL_LABEL.lower(), TRAIN_MODEL_LABEL.lower()}
-    model_name = slugify(model_name if model_name.lower() not in auto_names else "my_voice")
+    model_name = slugify(model_name if model_name.lower() not in auto_names else new_model_default_name())
+    model_dir = LOG_DIR / model_name
+    if force_train and model_dir.exists():
+        existing_artifacts = list(model_dir.glob("*.pth")) + list(model_dir.glob("*.index"))
+        if existing_artifacts:
+            raise FileExistsError(
+                f"新模型名 '{model_name}' 已经存在：{model_dir}\n"
+                "为了避免误用旧 checkpoint 导致训练一秒结束，请换一个新的模型名，"
+                "例如 new_voice_2，或先手动备份/删除这个旧模型目录。"
+            )
     cpu_cores = max(1, min(8, os.cpu_count() or 4))
     save_every = max(1, min(epochs, 10))
     log(f"没有现成模型，开始训练 '{model_name}'，素材数量：{len(audio_files)}。")
@@ -304,6 +317,7 @@ def prepare_model(
         ],
         log,
     )
+    train_started_at = datetime.now().timestamp()
     run_command(
         [
             str(PYTHON),
@@ -366,8 +380,17 @@ def prepare_model(
     )
 
     pth, index = build_index_if_possible(model_name, log)
-    if not pth or not index:
-        raise FileNotFoundError(f"训练完成，但没有在 logs/{model_name} 找到 .pth 和 .index")
+    if not pth or pth.stat().st_mtime < train_started_at:
+        raise FileNotFoundError(
+            f"训练命令结束了，但没有生成新的 .pth 权重：logs/{model_name}\n"
+            "这通常是同名旧模型/旧 checkpoint 被复用，或训练进程提前退出。"
+            "请换一个全新的模型名重新训练，并查看窗口日志里的 train 报错。"
+        )
+    if not index or index.stat().st_mtime < train_started_at:
+        raise FileNotFoundError(
+            f"训练后没有生成新的 .index 索引：logs/{model_name}\n"
+            "请确认特征提取成功，或重新点击训练。"
+        )
     return model_name, pth, index
 
 
@@ -1124,13 +1147,18 @@ class CoverApp:
                 self.status.set("未发现现成模型；可选择训练素材文件夹")
             return
         if choice == TRAIN_MODEL_LABEL:
-            if self.model_name.get().strip().lower() in {"", "auto", "自动", AUTO_MODEL_LABEL.lower()}:
-                self.model_name.set("new_voice")
+            current_name = self.model_name.get().strip()
+            current_slug = slugify(current_name) if current_name else ""
+            if (
+                current_name.lower() in {"", "auto", "自动", AUTO_MODEL_LABEL.lower()}
+                or (current_slug and (LOG_DIR / current_slug).exists())
+            ):
+                self.model_name.set(new_model_default_name())
             self.pth.set("")
             self.index.set("")
-            self.status.set("训练新模型：请输入新模型名，并选择新声音素材文件夹")
+            self.status.set("训练新模型：已生成不冲突的新模型名，请选择新声音素材文件夹")
             if write_log:
-                self.write("已切换到训练新模型模式。")
+                self.write("已切换到训练新模型模式。请使用新的模型名，避免覆盖/续训旧模型。")
             return
         if choice == MANUAL_MODEL_LABEL:
             self.status.set("手动模型模式")
@@ -1250,8 +1278,27 @@ class CoverApp:
             if not new_name or new_name.lower() in {"auto", "自动", AUTO_MODEL_LABEL.lower(), TRAIN_MODEL_LABEL.lower()}:
                 messagebox.showerror("缺少新模型名", "请给这次新声音填写一个模型名，例如 my_voice_2。")
                 return
+            new_slug = slugify(new_name)
+            if (LOG_DIR / new_slug).exists():
+                messagebox.showerror(
+                    "模型名已存在",
+                    f"模型 logs/{new_slug} 已经存在。\n\n"
+                    "请换一个全新的模型名，例如 new_voice_2 或 "
+                    f"{new_model_default_name()}。\n\n"
+                    "原因：同名旧模型会从旧 checkpoint 继续，如果旧模型已到默认训练轮数，"
+                    "训练会很快结束并继续使用旧权重。"
+                )
+                return
             if not self.voice_dir.get():
                 messagebox.showerror("缺少训练素材", "请先选择新声音素材文件夹。")
+                return
+            audio_files = [
+                p
+                for p in Path(self.voice_dir.get()).rglob("*")
+                if p.is_file() and p.suffix.lower() in AUDIO_EXTS
+            ]
+            if not audio_files:
+                messagebox.showerror("训练素材为空", "训练素材文件夹里没有支持的音频文件，请放入 wav/mp3/flac/m4a 等声音素材。")
                 return
 
         self.running = True
