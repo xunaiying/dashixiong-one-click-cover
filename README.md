@@ -49,11 +49,11 @@
 
 打开 Release 页面：
 
-[https://github.com/xunaiying/dashixiong-one-click-cover/releases/tag/v1.0.6](https://github.com/xunaiying/dashixiong-one-click-cover/releases/tag/v1.0.6)
+[https://github.com/xunaiying/dashixiong-one-click-cover/releases/tag/v1.0.7](https://github.com/xunaiying/dashixiong-one-click-cover/releases/tag/v1.0.7)
 
 直接下载：
 
-[https://github.com/xunaiying/dashixiong-one-click-cover/releases/download/v1.0.6/dashixiong-one-click-cover-v1.0.6.zip](https://github.com/xunaiying/dashixiong-one-click-cover/releases/download/v1.0.6/dashixiong-one-click-cover-v1.0.6.zip)
+[https://github.com/xunaiying/dashixiong-one-click-cover/releases/download/v1.0.7/dashixiong-one-click-cover-v1.0.7.zip](https://github.com/xunaiying/dashixiong-one-click-cover/releases/download/v1.0.7/dashixiong-one-click-cover-v1.0.7.zip)
 
 解压到纯英文路径，例如：
 
