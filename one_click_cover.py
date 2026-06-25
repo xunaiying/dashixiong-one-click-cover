@@ -7,7 +7,8 @@ import shutil
 import subprocess
 import sys
 import threading
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -96,6 +97,239 @@ def run_command(args: list[str], log, cwd: Path = APP_DIR) -> None:
     for line in process.stdout or []:
         log(line.rstrip())
     code = process.wait()
+    if code != 0:
+        raise RuntimeError(f"Command failed with exit code {code}: {' '.join(map(str, args))}")
+
+
+def format_duration(seconds: float | int | None) -> str:
+    if seconds is None:
+        return "--:--"
+    seconds = max(0, int(seconds))
+    return str(timedelta(seconds=seconds))
+
+
+def latest_training_checkpoints(model_name: str) -> list[dict[str, object]]:
+    model_dir = LOG_DIR / model_name
+    if not model_dir.exists():
+        return []
+    checkpoints: list[dict[str, object]] = []
+    pattern = re.compile(r"_(\d+)e_(\d+)s\.pth$", re.IGNORECASE)
+    for pth in model_dir.glob("*.pth"):
+        if pth.name.startswith(("G_", "D_")):
+            continue
+        match = pattern.search(pth.name)
+        if not match:
+            continue
+        epoch = int(match.group(1))
+        step = int(match.group(2))
+        checkpoints.append(
+            {
+                "path": pth,
+                "epoch": epoch,
+                "step": step,
+                "mtime": pth.stat().st_mtime,
+            }
+        )
+    return sorted(checkpoints, key=lambda item: float(item["mtime"]), reverse=True)
+
+
+def count_filelist_rows(model_name: str) -> int:
+    filelist = LOG_DIR / model_name / "filelist.txt"
+    if not filelist.exists():
+        return 0
+    try:
+        with filelist.open("r", encoding="utf-8", errors="ignore") as f:
+            return sum(1 for _ in f)
+    except OSError:
+        return 0
+
+
+def read_tensorboard_progress(model_name: str) -> dict[str, float] | None:
+    eval_dir = LOG_DIR / model_name / "eval"
+    if not eval_dir.exists():
+        return None
+    try:
+        from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+
+        ea = EventAccumulator(str(eval_dir), size_guidance={"scalars": 0})
+        ea.Reload()
+        tags = ea.Tags().get("scalars", [])
+        if not tags:
+            return None
+        preferred = [
+            "grad_avg_50/norm_g",
+            "loss_avg_50/g/total",
+            "learning_rate",
+            "loss/g/total",
+        ]
+        tag = next((candidate for candidate in preferred if candidate in tags), tags[0])
+        events = ea.Scalars(tag)
+        if not events:
+            return None
+        latest = events[-1]
+        data: dict[str, float] = {
+            "last_step": float(latest.step),
+            "last_wall_time": float(latest.wall_time),
+        }
+        if len(events) >= 2 and events[-1].step > events[0].step:
+            first = events[0]
+            data["sec_per_step"] = float((latest.wall_time - first.wall_time) / (latest.step - first.step))
+        return data
+    except Exception:
+        return None
+
+
+def get_training_progress(model_name: str, total_epochs: int, batch_size: int) -> dict[str, object] | None:
+    model_name = (model_name or "").strip()
+    if not model_name:
+        return None
+    total_epochs = max(1, int(total_epochs or 1))
+    batch_size = max(1, int(batch_size or 1))
+    model_dir = LOG_DIR / model_name
+    if not model_dir.exists():
+        return None
+
+    checkpoints = latest_training_checkpoints(model_name)
+    latest_checkpoint = checkpoints[0] if checkpoints else None
+    filelist_rows = count_filelist_rows(model_name)
+    fallback_steps_per_epoch = math.ceil(filelist_rows / batch_size) if filelist_rows else 0
+
+    steps_per_epoch: float | None = None
+    if latest_checkpoint and int(latest_checkpoint["epoch"]) > 0:
+        steps_per_epoch = float(latest_checkpoint["step"]) / float(latest_checkpoint["epoch"])
+    elif fallback_steps_per_epoch:
+        steps_per_epoch = float(fallback_steps_per_epoch)
+    if not steps_per_epoch or steps_per_epoch <= 0:
+        return None
+
+    tb = read_tensorboard_progress(model_name) or {}
+    current_step = tb.get("last_step")
+    last_wall_time = tb.get("last_wall_time")
+    sec_per_step = tb.get("sec_per_step")
+
+    if current_step is None and latest_checkpoint:
+        current_step = float(latest_checkpoint["step"])
+    if sec_per_step is None and len(checkpoints) >= 2:
+        newest = checkpoints[0]
+        older = checkpoints[1]
+        step_delta = float(newest["step"]) - float(older["step"])
+        time_delta = float(newest["mtime"]) - float(older["mtime"])
+        if step_delta > 0 and time_delta > 0:
+            sec_per_step = time_delta / step_delta
+    if current_step is None:
+        return None
+
+    total_steps = steps_per_epoch * total_epochs
+    current_epoch = current_step / steps_per_epoch
+    progress_percent = max(0.0, min(100.0, current_step / total_steps * 100.0))
+    remaining_seconds = None
+    eta = None
+    steps_per_minute = None
+    if sec_per_step and sec_per_step > 0:
+        remaining_steps = max(0.0, total_steps - current_step)
+        remaining_seconds = remaining_steps * sec_per_step
+        eta = datetime.now() + timedelta(seconds=remaining_seconds)
+        steps_per_minute = 60.0 / sec_per_step
+
+    return {
+        "model_name": model_name,
+        "current_step": int(current_step),
+        "total_steps": int(round(total_steps)),
+        "current_epoch": current_epoch,
+        "total_epochs": total_epochs,
+        "progress_percent": progress_percent,
+        "steps_per_epoch": steps_per_epoch,
+        "filelist_rows": filelist_rows,
+        "batch_size": batch_size,
+        "steps_per_minute": steps_per_minute,
+        "remaining_seconds": remaining_seconds,
+        "eta": eta,
+        "last_wall_time": last_wall_time,
+        "latest_checkpoint_epoch": int(latest_checkpoint["epoch"]) if latest_checkpoint else None,
+        "latest_checkpoint_step": int(latest_checkpoint["step"]) if latest_checkpoint else None,
+        "latest_checkpoint_path": latest_checkpoint["path"] if latest_checkpoint else None,
+    }
+
+
+def format_training_progress(snapshot: dict[str, object] | None) -> str:
+    if not snapshot:
+        return "训练进度：等待训练日志写入…"
+    current_epoch = float(snapshot["current_epoch"])
+    total_epochs = int(snapshot["total_epochs"])
+    percent = float(snapshot["progress_percent"])
+    current_step = int(snapshot["current_step"])
+    total_steps = int(snapshot["total_steps"])
+    speed = snapshot.get("steps_per_minute")
+    remaining = snapshot.get("remaining_seconds")
+    eta = snapshot.get("eta")
+    speed_text = f"{float(speed):.1f} step/分钟" if speed else "速度计算中"
+    eta_text = eta.strftime("%H:%M:%S") if isinstance(eta, datetime) else "--:--"
+    return (
+        f"训练进度：第 {current_epoch:.1f}/{total_epochs} 轮，总进度 {percent:.1f}%，"
+        f"step {current_step}/{total_steps}，{speed_text}，"
+        f"剩余约 {format_duration(float(remaining)) if remaining is not None else '--:--'}，"
+        f"预计 {eta_text} 完成"
+    )
+
+
+def run_training_command(
+    args: list[str],
+    model_name: str,
+    total_epochs: int,
+    batch_size: int,
+    log,
+    progress_hook=None,
+    cwd: Path = APP_DIR,
+) -> None:
+    env = os.environ.copy()
+    env["PATH"] = str(APP_DIR) + os.pathsep + env.get("PATH", "")
+    log("$ " + " ".join(f'"{a}"' if " " in str(a) else str(a) for a in args))
+    process = subprocess.Popen(
+        [str(a) for a in args],
+        cwd=str(cwd),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+    )
+
+    stop_event = threading.Event()
+    last_reported_step: int | None = None
+
+    def monitor() -> None:
+        nonlocal last_reported_step
+        time.sleep(5)
+        while not stop_event.is_set():
+            snapshot = get_training_progress(model_name, total_epochs, batch_size)
+            if snapshot:
+                step = int(snapshot["current_step"])
+                if step != last_reported_step:
+                    last_reported_step = step
+                    message = format_training_progress(snapshot)
+                    log(message)
+                    if progress_hook:
+                        progress_hook(snapshot)
+            stop_event.wait(15)
+
+    monitor_thread = threading.Thread(target=monitor, daemon=True)
+    monitor_thread.start()
+    try:
+        for line in process.stdout or []:
+            log(line.rstrip())
+        code = process.wait()
+    finally:
+        stop_event.set()
+        monitor_thread.join(timeout=1)
+
+    snapshot = get_training_progress(model_name, total_epochs, batch_size)
+    if snapshot:
+        message = format_training_progress(snapshot)
+        log(message)
+        if progress_hook:
+            progress_hook(snapshot)
     if code != 0:
         raise RuntimeError(f"Command failed with exit code {code}: {' '.join(map(str, args))}")
 
@@ -475,6 +709,7 @@ def prepare_model(
     gpu: str,
     log,
     force_train: bool = False,
+    progress_hook=None,
 ) -> tuple[str, Path, Path]:
     existing = None if force_train else resolve_existing_model(model_name, log)
     if existing:
@@ -573,7 +808,7 @@ def prepare_model(
         ],
         log,
     )
-    run_command(
+    run_training_command(
         [
             str(PYTHON),
             "core.py",
@@ -609,7 +844,11 @@ def prepare_model(
             "--index_algorithm",
             "Auto",
         ],
-        log,
+        model_name=model_name,
+        total_epochs=epochs,
+        batch_size=batch_size,
+        log=log,
+        progress_hook=progress_hook,
     )
 
     pth, index = build_index_if_possible(model_name, log)
@@ -991,6 +1230,7 @@ def create_cover(
     vocal_gain: float = 1.0,
     instrumental_gain: float = 1.0,
     force_train: bool = False,
+    progress_hook=None,
 ) -> Path:
     if not song_path.exists():
         raise FileNotFoundError(f"Song file not found: {song_path}")
@@ -1019,6 +1259,7 @@ def create_cover(
             gpu,
             log,
             force_train=force_train,
+            progress_hook=progress_hook,
         )
 
     vocals, instrumental = separate_song(song_path, work_dir, log)
@@ -1185,7 +1426,7 @@ class CoverApp:
         self.root.title("大尸兄一键翻唱")
         self.root.geometry("920x680")
         self.root.minsize(860, 620)
-        self.queue: queue.Queue[str] = queue.Queue()
+        self.queue: queue.Queue[object] = queue.Queue()
         self.running = False
 
         self.song = tk.StringVar()
@@ -1407,6 +1648,8 @@ class CoverApp:
         self.last_original_preview = tk.StringVar()
         self.last_cover_preview = tk.StringVar()
         self.status = tk.StringVar(value="就绪")
+        self.training_progress_text = tk.StringVar(value="训练进度：未开始")
+        self.training_progress_value = tk.DoubleVar(value=0.0)
 
         self.build_ui()
         self.refresh_models(write_log=False)
@@ -1487,6 +1730,13 @@ class CoverApp:
         status_bar = ttk.Frame(self.root)
         status_bar.pack(fill="x", padx=10, pady=(0, 6))
         ttk.Label(status_bar, textvariable=self.status, foreground="#555").pack(anchor="w")
+        ttk.Label(status_bar, textvariable=self.training_progress_text, foreground="#555").pack(anchor="w", pady=(2, 0))
+        ttk.Progressbar(
+            status_bar,
+            variable=self.training_progress_value,
+            maximum=100.0,
+            mode="determinate",
+        ).pack(fill="x", pady=(2, 0))
 
         log_frame = ttk.LabelFrame(self.root, text="日志")
         log_frame.pack(fill="both", expand=True, **pad)
@@ -1790,10 +2040,27 @@ class CoverApp:
     def status_threadsafe(self, message: str):
         self.queue.put(f"__STATUS__:{message}")
 
+    def training_progress_threadsafe(self, snapshot: dict[str, object]):
+        self.queue.put(("__TRAIN_PROGRESS__", snapshot))
+
+    def apply_training_progress(self, snapshot: dict[str, object] | None):
+        message = format_training_progress(snapshot)
+        self.training_progress_text.set(message)
+        if snapshot:
+            percent = max(0.0, min(100.0, float(snapshot.get("progress_percent", 0.0))))
+            self.training_progress_value.set(percent)
+            self.status.set(message)
+
     def poll(self):
         try:
             while True:
                 message = self.queue.get_nowait()
+                if isinstance(message, tuple) and len(message) == 2 and message[0] == "__TRAIN_PROGRESS__":
+                    snapshot = message[1] if isinstance(message[1], dict) else None
+                    self.apply_training_progress(snapshot)
+                    continue
+                if not isinstance(message, str):
+                    continue
                 if message == "__REFRESH_MODELS__":
                     self.refresh_models(write_log=False)
                     continue
@@ -1897,6 +2164,12 @@ class CoverApp:
 
         self.running = True
         self.status.set("正在生成翻唱…")
+        if train_mode:
+            self.training_progress_text.set("训练进度：准备预处理和特征提取…")
+            self.training_progress_value.set(0.0)
+        else:
+            self.training_progress_text.set("训练进度：本次使用已有模型，无需训练")
+            self.training_progress_value.set(100.0)
         self.write("开始任务：分离歌曲、转换声线、混音输出。")
 
         def task():
@@ -1925,7 +2198,21 @@ class CoverApp:
                     vocal_gain=float(self.vocal_gain.get()),
                     instrumental_gain=float(self.instrumental_gain.get()),
                     force_train=train_mode,
+                    progress_hook=self.training_progress_threadsafe if train_mode else None,
                 )
+                if train_mode:
+                    self.training_progress_threadsafe(
+                        {
+                            "current_epoch": int(self.epochs.get()),
+                            "total_epochs": int(self.epochs.get()),
+                            "progress_percent": 100.0,
+                            "current_step": 1,
+                            "total_steps": 1,
+                            "steps_per_minute": None,
+                            "remaining_seconds": 0,
+                            "eta": datetime.now(),
+                        }
+                    )
                 self.log_threadsafe(f"生成完成：{result}")
                 if train_mode and auto_cleanup_after_train:
                     try:
