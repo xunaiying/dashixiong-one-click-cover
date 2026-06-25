@@ -33,18 +33,223 @@
 
 ## 快速开始 / Quick Start
 
-详细部署和模型下载说明：
+> 下面就是完整部署步骤和基础模型下载链接。你不需要先去翻其它文档；照着本页操作即可。
+>
+> Full deployment steps and base model download links are listed directly below. You can follow this page without opening separate docs first.
 
-- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)：Windows 部署、安装环境、一键启动、常见问题。
-- [`docs/MODEL_DOWNLOADS.md`](docs/MODEL_DOWNLOADS.md)：基础模型、预训练权重、FFmpeg 运行件下载链接和放置路径。
+### 1. 下载项目 / Download
 
-1. 下载本仓库 ZIP 或使用 Git 克隆。
-2. 建议放在纯英文路径，例如 `D:\Applio`，避免部分音频/AI 依赖遇到中文路径问题。
-3. 双击 `run-ui.bat` 打开启动器，先检查/安装环境和基础模型。
-4. 双击 `run-one-click-cover.bat` 或 `大尸兄一键翻唱.bat` 打开一键翻唱窗口。
-5. 选择歌曲文件，选择现有模型或训练新模型，然后点击“一键生成混音翻唱”。
-6. 成品默认输出到 `outputs/covers`。
+#### 方式 A：下载 Release ZIP（推荐）
 
+打开 Release 页面：
+
+[https://github.com/xunaiying/dashixiong-one-click-cover/releases/tag/v1.0.1](https://github.com/xunaiying/dashixiong-one-click-cover/releases/tag/v1.0.1)
+
+直接下载：
+
+[https://github.com/xunaiying/dashixiong-one-click-cover/releases/download/v1.0.1/dashixiong-one-click-cover-v1.0.1.zip](https://github.com/xunaiying/dashixiong-one-click-cover/releases/download/v1.0.1/dashixiong-one-click-cover-v1.0.1.zip)
+
+解压到纯英文路径，例如：
+
+```text
+D:\Applio
+```
+
+> 注意：推荐纯英文路径，避免部分音频/AI 依赖遇到中文路径、空格或特殊符号出错。
+
+#### 方式 B：Git 克隆
+
+```powershell
+git clone https://github.com/xunaiying/dashixiong-one-click-cover.git D:\Applio
+cd /d D:\Applio
+```
+
+English:
+
+- Download the Release ZIP or clone the repo.
+- Extract/clone it to a simple ASCII path such as `D:\Applio`.
+
+### 2. 安装运行环境 / Install environment
+
+#### 一键图形方式（推荐）
+
+双击：
+
+```text
+run-ui.bat
+```
+
+在启动器里点击：
+
+```text
+安装环境
+```
+
+它会自动：
+
+- 下载/复用 Miniconda
+- 创建项目内 Python 环境 `env`
+- 安装 Applio 依赖
+- 安装 Demucs 人声/伴奏分离依赖
+
+#### PowerShell 方式
+
+```powershell
+cd /d D:\Applio
+powershell -ExecutionPolicy Bypass -File .\install_env.ps1
+```
+
+安装日志路径：
+
+```text
+D:\Applio\logs\launcher-install.log
+```
+
+### 3. 下载基础模型与运行件 / Download base models and runtime assets
+
+#### 一键图形方式（推荐）
+
+双击：
+
+```text
+run-ui.bat
+```
+
+依次点击：
+
+```text
+检查缺失
+下载缺失
+```
+
+#### 命令行方式
+
+如果已经安装好环境：
+
+```powershell
+cd /d D:\Applio
+env\python.exe download_base_models.py
+```
+
+如果还没有项目内环境，也可以临时使用系统 Python：
+
+```powershell
+cd /d D:\Applio
+python download_base_models.py
+```
+
+#### 手动下载链接和放置路径 / Manual download links and target paths
+
+如果自动下载失败，就手动打开下面链接下载，然后放到对应“项目内目标路径”。例如项目在 `D:\Applio`，目标路径 `rvc\models\predictors\rmvpe.pt` 的完整路径就是：
+
+```text
+D:\Applio\rvc\models\predictors\rmvpe.pt
+```
+
+| 类型 / Type | 项目内目标路径 / Target path inside project | 下载链接 / Download link |
+|---|---|---|
+| F0 predictor | `rvc\models\predictors\rmvpe.pt` | [rmvpe.pt](https://huggingface.co/IAHispano/Applio/resolve/main/Resources/predictors/rmvpe.pt) |
+| F0 predictor | `rvc\models\predictors\fcpe.pt` | [fcpe.pt](https://huggingface.co/IAHispano/Applio/resolve/main/Resources/predictors/fcpe.pt) |
+| ContentVec embedder | `rvc\models\embedders\contentvec\pytorch_model.bin` | [pytorch_model.bin](https://huggingface.co/IAHispano/Applio/resolve/main/Resources/embedders/contentvec/pytorch_model.bin) |
+| ContentVec config | `rvc\models\embedders\contentvec\config.json` | [config.json](https://huggingface.co/IAHispano/Applio/resolve/main/Resources/embedders/contentvec/config.json) |
+| HiFi-GAN D 32k | `rvc\models\pretraineds\hifi-gan\f0D32k.pth` | [f0D32k.pth](https://huggingface.co/IAHispano/Applio/resolve/main/Resources/pretrained_v2/f0D32k.pth) |
+| HiFi-GAN D 40k | `rvc\models\pretraineds\hifi-gan\f0D40k.pth` | [f0D40k.pth](https://huggingface.co/IAHispano/Applio/resolve/main/Resources/pretrained_v2/f0D40k.pth) |
+| HiFi-GAN D 48k | `rvc\models\pretraineds\hifi-gan\f0D48k.pth` | [f0D48k.pth](https://huggingface.co/IAHispano/Applio/resolve/main/Resources/pretrained_v2/f0D48k.pth) |
+| HiFi-GAN G 32k | `rvc\models\pretraineds\hifi-gan\f0G32k.pth` | [f0G32k.pth](https://huggingface.co/IAHispano/Applio/resolve/main/Resources/pretrained_v2/f0G32k.pth) |
+| HiFi-GAN G 40k | `rvc\models\pretraineds\hifi-gan\f0G40k.pth` | [f0G40k.pth](https://huggingface.co/IAHispano/Applio/resolve/main/Resources/pretrained_v2/f0G40k.pth) |
+| HiFi-GAN G 48k | `rvc\models\pretraineds\hifi-gan\f0G48k.pth` | [f0G48k.pth](https://huggingface.co/IAHispano/Applio/resolve/main/Resources/pretrained_v2/f0G48k.pth) |
+| RefineGAN D 24k | `rvc\models\pretraineds\refinegan\f0D24k.pth` | [f0D24k.pth](https://huggingface.co/IAHispano/Applio/resolve/main/Resources/refinegan/f0D24k.pth) |
+| RefineGAN G 24k | `rvc\models\pretraineds\refinegan\f0G24k.pth` | [f0G24k.pth](https://huggingface.co/IAHispano/Applio/resolve/main/Resources/refinegan/f0G24k.pth) |
+| RefineGAN D 32k | `rvc\models\pretraineds\refinegan\f0D32k.pth` | [f0D32k.pth](https://huggingface.co/IAHispano/Applio/resolve/main/Resources/refinegan/f0D32k.pth) |
+| RefineGAN G 32k | `rvc\models\pretraineds\refinegan\f0G32k.pth` | [f0G32k.pth](https://huggingface.co/IAHispano/Applio/resolve/main/Resources/refinegan/f0G32k.pth) |
+| FFmpeg | `ffmpeg.exe` | [ffmpeg.exe](https://huggingface.co/IAHispano/Applio/resolve/main/Resources/ffmpeg.exe) |
+| FFprobe | `ffprobe.exe` | [ffprobe.exe](https://huggingface.co/IAHispano/Applio/resolve/main/Resources/ffprobe.exe) |
+
+#### 额外依赖链接 / Additional dependency links
+
+| 用途 / Purpose | 下载链接 / Download link |
+|---|---|
+| Miniconda Windows installer | [Miniconda3-py312_25.11.1-1-Windows-x86_64.exe](https://repo.anaconda.com/miniconda/Miniconda3-py312_25.11.1-1-Windows-x86_64.exe) |
+| PyTorch CUDA wheels index | [https://download.pytorch.org/whl/cu128](https://download.pytorch.org/whl/cu128) |
+| Applio upstream resources | [https://huggingface.co/IAHispano/Applio/tree/main/Resources](https://huggingface.co/IAHispano/Applio/tree/main/Resources) |
+
+### 4. 启动大尸兄一键翻唱 / Launch DaShiXiong One-Click Cover
+
+双击任意一个：
+
+```text
+run-one-click-cover.bat
+大尸兄一键翻唱.bat
+```
+
+或者打开启动器：
+
+```text
+run-ui.bat
+```
+
+然后点击：
+
+```text
+大尸兄一键翻唱
+```
+
+### 5. 第一次生成翻唱 / First cover generation
+
+1. 打开一键翻唱窗口。
+2. 选择歌曲文件。
+3. 如果已有模型，选择“自动选择最新可用模型”。
+4. 如果没有模型，选择“训练新模型”，填写模型名并选择干净的人声素材文件夹。
+5. 保持默认开启：
+   - 自动估算变调
+   - 咬字清晰模式
+   - 自动匹配原唱混音
+6. 点击“一键生成混音翻唱”。
+7. 成品默认输出到：
+
+```text
+outputs\covers
+```
+
+### 6. 训练素材建议 / Voice sample recommendations
+
+- 推荐 10–30 分钟清晰干声。
+- 尽量不要有伴奏、混响、强降噪、爆音。
+- 做唱歌翻唱时，最好提供你的清唱/唱歌素材。
+- 如果咬字糊，优先补充更清晰的 z/c/s、zh/ch/sh、t/k/p 等发音素材。
+
+English:
+
+- Use 10–30 minutes of clean dry voice when possible.
+- Avoid backing music, heavy reverb, aggressive denoise artifacts, and clipping.
+- For singing covers, singing/acapella samples are better than speech-only samples.
+- If pronunciation is blurry, add clearer consonant-heavy samples.
+
+### 7. 常见问题 / FAQ
+
+#### 下载很慢怎么办？
+
+基础模型来自 Hugging Face。你可以直接用上面的表格链接手动下载，然后放到对应路径。
+
+#### 没有 NVIDIA 显卡能用吗？
+
+可以尝试 CPU，但训练和推理会明显更慢。推荐 NVIDIA GPU。
+
+#### 成品只有伴奏或人声太小？
+
+确认使用最新版脚本，并保持“自动匹配原唱混音”开启。必要时把“人声微调”调到 `1.10` 或 `1.20`。
+
+#### 咬字不清怎么办？
+
+保持“咬字清晰模式”开启；可以把“辅音保护”调到 `0.55`–`0.65`，并适当降低“索引强度”。
+
+### 8. 补充文档 / Extra docs
+
+下面文档只是补充备查；部署步骤和下载链接已经完整放在本页上。
+
+- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)
+- [`docs/MODEL_DOWNLOADS.md`](docs/MODEL_DOWNLOADS.md)
+- [`docs/PROJECT_REFERENCES.md`](docs/PROJECT_REFERENCES.md)
 ## 案例说明 / Example Case
 
 本仓库包含一个案例说明页，展示“原唱输入 → 大尸兄一键翻唱输出”的工作流：
@@ -196,3 +401,6 @@ Applio is made possible thanks to these projects and their references:
 <a href="https://github.com/IAHispano/Applio/graphs/contributors" target="_blank">
   <img src="https://contrib.rocks/image?repo=IAHispano/Applio" />
 </a>
+
+
+
